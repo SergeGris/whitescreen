@@ -23,6 +23,9 @@
   "cleanup": [
     "/include",
     "/lib/pkgconfig",
+    "/lib64/pkgconfig",
+    "/lib/girepository-1.0",
+    "/lib64/girepository-1.0",
     "/share/gir-1.0",
     "/share/vala",
     "*.a",
