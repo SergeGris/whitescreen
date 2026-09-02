@@ -25,7 +25,7 @@ jobs:
       APP_ID: io.github.SergeGris.WhiteScreen
       MANIFEST: build-aux/io.github.SergeGris.WhiteScreen.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install flatpak-builder
         run: |
@@ -46,6 +46,23 @@ jobs:
             librsvg2-common gdk-pixbuf2.0-bin
           flatpak remote-add --if-not-exists --user \
             flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      # GNOME runtimes go end-of-life roughly a year after release, and a stale
+      # pin is easy to miss: the build keeps working for months and then the
+      # runtime disappears. Surface the status in the log, and fail clearly if
+      # the pinned branch is gone entirely.
+      - name: Check the pinned runtime
+        run: |
+          set -eu
+          runtime="$(python3 -c "import json,os;m=json.load(open(os.environ['MANIFEST']));print(m['runtime']+'//'+m['runtime-version'])")"
+          echo "Manifest pins: $runtime"
+          if ! flatpak remote-info --user flathub "$runtime"; then
+            echo "::error::$runtime is not available on Flathub - update runtime-version in $MANIFEST"
+            exit 1
+          fi
+          if flatpak remote-info --user flathub "$runtime" | grep -qi "end-of-life"; then
+            echo "::warning::$runtime is end-of-life - plan a runtime bump"
+          fi
 
       - name: Build and export to an OSTree repository
         run: |
@@ -69,7 +86,7 @@ jobs:
             --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
           ls -lh whitescreen.flatpak
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: whitescreen-flatpak
           path: whitescreen.flatpak

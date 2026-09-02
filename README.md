@@ -18,6 +18,11 @@ things an ordinary maximized window can't give you.
 White Screen is a Wayland application. It needs a compositor implementing
 **`wlr-layer-shell`**:
 
+The Flatpak build targets the `org.gnome.Platform` runtime pinned in
+`build-aux/io.github.SergeGris.WhiteScreen.json`. GNOME runtimes go end-of-life
+about a year after release, so that pin needs bumping periodically; CI prints
+the runtime's status on every build and fails if the branch is gone.
+
 | Compositor | Supported |
 | ---------- | --------- |
 | Niri, Sway, Hyprland, Wayfire, river | yes |

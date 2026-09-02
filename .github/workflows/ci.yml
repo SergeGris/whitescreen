@@ -19,7 +19,7 @@ jobs:
       matrix:
         features: ["default", "gamma"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5, which match the floors
       # declared in Cargo.toml. It has no gtk4-layer-shell package at all, so
@@ -93,7 +93,7 @@ jobs:
     name: Validate desktop entry and AppStream metadata
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install validators
         run: |
