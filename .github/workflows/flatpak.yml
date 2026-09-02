@@ -35,9 +35,15 @@ jobs:
           # only *Recommends* it, so --no-install-recommends drops it and the
           # build dies at the very last step. The rest are host-side tools
           # flatpak-builder uses to unpack sources.
+          #
+          # librsvg2-common supplies gdk-pixbuf's SVG loader. `appstreamcli
+          # compose` runs on the HOST and rasterises the app icon to build
+          # catalog icons; without the loader it cannot read an .svg icon and
+          # fails the whole build with a bare "file-read-error".
           sudo apt-get install -y --no-install-recommends \
             flatpak flatpak-builder \
-            elfutils patch xz-utils zstd unzip
+            elfutils patch xz-utils zstd unzip \
+            librsvg2-common gdk-pixbuf2.0-bin
           flatpak remote-add --if-not-exists --user \
             flathub https://flathub.org/repo/flathub.flatpakrepo
 

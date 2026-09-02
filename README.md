@@ -130,8 +130,9 @@ release or a Flathub submission:
   requires a fixed `commit` for git sources; the commit for that tag begins
   `1c963c5`, so add the full 40-character hash before submitting. (CI does not
   use this pin — it resolves the newest release tag at build time.)
-- **Icons** — `data/icons/` contains hand-written SVGs that have not been
-  reviewed at their rendered sizes (128px and 16px).
+- **Symbolic icon** — `data/icons/hicolor/symbolic/` is a hand-written SVG that
+  has not been reviewed at its rendered size (16px). The 128x128 PNG and the
+  scalable SVG share the same design.
 
 ## License
 

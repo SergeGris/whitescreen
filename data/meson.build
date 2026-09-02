@@ -22,6 +22,14 @@ install_data(
   install_dir: datadir / icondir / 'symbolic' / 'apps',
 )
 
+# A raster icon alongside the scalable one. `appstreamcli compose` runs on the
+# build host and needs to read an icon; shipping a PNG means that never depends
+# on the host having gdk-pixbuf's SVG loader available.
+install_data(
+  icondir / '128x128' / 'apps' / (app_id + '.png'),
+  install_dir: datadir / icondir / '128x128' / 'apps',
+)
+
 # ── Validation (skipped when the tools are absent) ───────────────────────────
 desktop_file_validate = find_program('desktop-file-validate', required: false)
 if desktop_file_validate.found()
