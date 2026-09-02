@@ -58,14 +58,12 @@
     <color type="primary" scheme_preference="dark">#241f31</color>
   </branding>
 
-  <!-- TODO: replace with real screenshots before submitting to Flathub;
-       appstreamcli will warn, and Flathub review will reject placeholders. -->
-  <screenshots>
-    <screenshot type="default">
-      <image>https://raw.githubusercontent.com/SergeGris/whitescreen/main/data/screenshots/main-window.png</image>
-      <caption>Choosing a color and the monitors to cover</caption>
-    </screenshot>
-  </screenshots>
+  <!-- No <screenshots> block until a real screenshot exists in the repo.
+       appstreamcli compose fails with file-read-error on an image it cannot
+       fetch, and Flathub rejects placeholders. To add one: put the PNG in
+       data/screenshots/, commit it, and reference its raw.githubusercontent
+       URL on the *master* branch. -->
+
 
   <releases>
     <release version="1.0.0" date="2026-09-02">

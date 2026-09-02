@@ -121,9 +121,10 @@ app to [Flathub](https://github.com/flathub/flathub/blob/master/README.md) —
 These items are placeholders and must be checked against reality before a
 release or a Flathub submission:
 
-- **Screenshot** — `data/io.github.SergeGris.WhiteScreen.metainfo.xml` points at
-  `data/screenshots/main-window.png`, which does not exist yet. Flathub review
-  rejects placeholder screenshots.
+- **Screenshot** — the metainfo has no `<screenshots>` block. Flathub requires
+  at least one. Add a real PNG under `data/screenshots/`, commit it, and
+  reference its `raw.githubusercontent.com` URL on the **master** branch (the
+  earlier placeholder pointed at `main`, which does not exist here).
 - **gtk4-layer-shell commit hash** — `build-aux/io.github.SergeGris.WhiteScreen.json`
   pins tag `v1.3.0` (confirmed to be the current release). Flathub additionally
   requires a fixed `commit` for git sources; the commit for that tag begins
