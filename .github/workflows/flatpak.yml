@@ -94,6 +94,18 @@ jobs:
           cat "$RUNNER_TEMP/repo/whitescreen.flatpakrepo"
           echo "Repo will be served at ${url}"
 
+      # Best-effort: turns Pages on via the API so the deploy job below can
+      # succeed without anyone visiting repository settings. It fails silently
+      # when the account or org policy does not permit it, in which case Pages
+      # must be enabled once by hand:
+      #   Settings -> Pages -> Source -> GitHub Actions
+      - name: Enable GitHub Pages
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
