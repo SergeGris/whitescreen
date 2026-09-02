@@ -21,36 +21,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5, which match the floors
+      # declared in Cargo.toml. It has no gtk4-layer-shell package at all, so
+      # that one is built from source below.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
+            libgtk-4-dev libadwaita-1-dev \
+            meson ninja-build libwayland-dev wayland-protocols
+
+      - name: Build and install gtk4-layer-shell
+        run: |
+          set -eux
+          git clone --filter=blob:none https://github.com/wmww/gtk4-layer-shell.git
+          cd gtk4-layer-shell
+          # Resolve the newest release tag rather than hardcoding one, so this
+          # step cannot break on a version that does not exist.
+          tag="$(git tag -l 'v*' --sort=-v:refname | head -n1)"
+          echo "Building gtk4-layer-shell $tag"
+          git checkout "$tag"
+          # Retry with defaults if upstream ever renames one of these options.
+          meson setup build --prefix=/usr --buildtype=release \
+            -Dexamples=false -Ddocs=false -Dtests=false \
+            || meson setup --wipe build --prefix=/usr --buildtype=release
+          ninja -C build
+          sudo ninja -C build install
+          sudo ldconfig
+          pkg-config --modversion gtk4-layer-shell-0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
+      - name: Select cargo features
+        id: feat
         run: |
           if [ "${{ matrix.features }}" = "gamma" ]; then
-            cargo build --locked --features gamma
+            echo "args=--features gamma" >> "$GITHUB_OUTPUT"
           else
-            cargo build --locked
+            echo "args=" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Build
+        run: cargo build --locked ${{ steps.feat.outputs.args }}
 
       - name: Clippy
-        run: |
-          if [ "${{ matrix.features }}" = "gamma" ]; then
-            cargo clippy --locked --features gamma --all-targets
-          else
-            cargo clippy --locked --all-targets
-          fi
+        run: cargo clippy --locked --all-targets ${{ steps.feat.outputs.args }}
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked ${{ steps.feat.outputs.args }}
 
   data:
     name: Validate desktop entry and AppStream metadata

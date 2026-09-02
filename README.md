@@ -66,6 +66,21 @@ cargo build --release
 **Identify** flashes each monitor's connector name (`DP-1`, `HDMI-A-2`, …) on the
 screen itself, so you always know which physical panel you're looking at.
 
+## Before publishing
+
+These items are placeholders and must be checked against reality before a
+release or a Flathub submission:
+
+- **Screenshot** — `data/io.github.SergeGris.WhiteScreen.metainfo.xml` points at
+  `data/screenshots/main-window.png`, which does not exist yet. Flathub review
+  rejects placeholder screenshots.
+- **gtk4-layer-shell pin** — `build-aux/io.github.SergeGris.WhiteScreen.json`
+  pins tag `v1.1.1`. Verify that tag exists and add the matching `commit` hash;
+  Flathub requires a fixed commit for git sources. (CI does not use this pin —
+  it resolves the newest release tag at build time.)
+- **Icons** — `data/icons/` contains hand-written SVGs that have not been
+  reviewed at their rendered sizes (128px and 16px).
+
 ## License
 
 GPL-3.0-or-later. See [COPYING](COPYING).
