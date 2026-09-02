@@ -16,29 +16,10 @@
     "/lib64/girepository-1.0",
     "/share/gir-1.0",
     "/share/vala",
-    "/rust",
     "*.a",
     "*.la"
   ],
   "modules": [
-    {
-      "name": "rust-toolchain",
-      "buildsystem": "simple",
-      "build-options": {
-        "build-args": [
-          "--share=network"
-        ],
-        "env": {
-          "RUSTUP_HOME": "/app/rust/rustup",
-          "CARGO_HOME": "/app/rust/cargo"
-        }
-      },
-      "build-commands": [
-        "if command -v curl >/dev/null 2>&1; then curl --proto '=https' --tlsv1.2 -sSfL https://sh.rustup.rs -o rustup-init.sh; else wget -O rustup-init.sh https://sh.rustup.rs; fi",
-        "sh rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain stable",
-        "/app/rust/cargo/bin/rustc --version"
-      ]
-    },
     {
       "name": "gtk4-layer-shell",
       "buildsystem": "meson",
@@ -57,21 +38,25 @@
     },
     {
       "name": "whitescreen",
-      "buildsystem": "meson",
-      "config-opts": [
-        "-Dbuildtype=release",
-        "-Dgamma=true"
-      ],
+      "buildsystem": "simple",
       "build-options": {
         "build-args": [
           "--share=network"
         ],
-        "append-path": "/app/rust/cargo/bin",
+        "append-path": "/run/build/whitescreen/rust/cargo/bin",
         "env": {
-          "RUSTUP_HOME": "/app/rust/rustup",
-          "CARGO_HOME": "/run/build/whitescreen/cargo"
+          "RUSTUP_HOME": "/run/build/whitescreen/rust/rustup",
+          "CARGO_HOME": "/run/build/whitescreen/rust/cargo"
         }
       },
+      "build-commands": [
+        "if command -v curl >/dev/null 2>&1; then curl --proto '=https' --tlsv1.2 -sSfL https://sh.rustup.rs -o rustup-init.sh; else wget -O rustup-init.sh https://sh.rustup.rs; fi",
+        "sh rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain stable",
+        "rustc --version && cargo --version",
+        "meson setup _flatpak_build --prefix=/app -Dbuildtype=release -Dgamma=true",
+        "ninja -C _flatpak_build",
+        "ninja -C _flatpak_build install"
+      ],
       "sources": [
         {
           "type": "dir",
