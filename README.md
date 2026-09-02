@@ -49,6 +49,37 @@ Options:
 | ------ | ------- | ----------- |
 | `-Dgamma=true` | `false` | Watch `zwlr-gamma-control-v1` and show when another client (wlsunset, gammastep, wl-gammarelay) holds a color filter |
 
+### From the project's Flatpak repository (recommended)
+
+Every push to the default branch publishes an OSTree repository to GitHub
+Pages, so ordinary `flatpak update` works. Add the remote once:
+
+```sh
+flatpak remote-add --user --no-gpg-verify whitescreen \
+    https://sergegris.github.io/whitescreen/whitescreen.flatpakrepo
+flatpak install --user whitescreen io.github.SergeGris.WhiteScreen
+```
+
+From then on:
+
+```sh
+flatpak update
+```
+
+`--no-gpg-verify` is needed because the repository is unsigned; the download
+itself is still over HTTPS. See *Signing the repository* below.
+
+> **Repository owner:** this requires **Settings → Pages → Source = GitHub
+> Actions** to be enabled once. Until then the deploy job fails and the URL
+> above 404s.
+
+### One-off bundle (no auto-update)
+
+```sh
+wget https://github.com/SergeGris/whitescreen/releases/download/continuous/whitescreen.flatpak
+flatpak install --user ./whitescreen.flatpak
+```
+
 ### With cargo only (binary, no desktop integration)
 
 ```sh
@@ -65,6 +96,25 @@ cargo build --release
 
 **Identify** flashes each monitor's connector name (`DP-1`, `HDMI-A-2`, …) on the
 screen itself, so you always know which physical panel you're looking at.
+
+## Signing the repository
+
+The published repository is unsigned, which is why users pass
+`--no-gpg-verify`. To sign it:
+
+1. Generate a key: `gpg --quick-gen-key "White Screen CI" default default never`
+2. Export the private key and store it as the repository secret
+   `FLATPAK_GPG_KEY`: `gpg --export-secret-keys --armor <key-id> | base64 -w0`
+3. In `.github/workflows/flatpak.yml`, import the key and add
+   `--gpg-sign=<key-id>` to both `flatpak-builder` and
+   `flatpak build-update-repo`, then add the base64 of the *public* key as a
+   `GPGKey=` line in the generated `.flatpakrepo`.
+
+Users can then add the remote without `--no-gpg-verify`.
+
+For a distribution channel that needs none of this infrastructure, submit the
+app to [Flathub](https://github.com/flathub/flathub/blob/master/README.md) —
+`build-aux/io.github.SergeGris.WhiteScreen.json` is the manifest to submit.
 
 ## Before publishing
 

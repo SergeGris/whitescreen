@@ -1,0 +1,129 @@
+name: Flatpak
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write        # updating the rolling release
+      pages: write           # uploading the Pages artifact
+      id-token: write
+    env:
+      APP_ID: io.github.SergeGris.WhiteScreen
+      MANIFEST: build-aux/io.github.SergeGris.WhiteScreen.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build and export to an OSTree repository
+        run: |
+          set -eux
+          # Build outside the checkout. The manifest's app module is
+          # `"type": "dir", "path": "../"`, so anything left in the repo root
+          # would be copied into the build as source — including the build tree.
+          flatpak-builder \
+            --user --install-deps-from=flathub \
+            --force-clean --disable-rofiles-fuse \
+            --state-dir="$RUNNER_TEMP/fb-state" \
+            --repo="$RUNNER_TEMP/repo" \
+            "$RUNNER_TEMP/builddir" "$MANIFEST"
+          flatpak build-update-repo "$RUNNER_TEMP/repo"
+
+      - name: Create single-file bundle
+        run: |
+          set -eux
+          flatpak build-bundle "$RUNNER_TEMP/repo" whitescreen.flatpak \
+            "$APP_ID" \
+            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
+          ls -lh whitescreen.flatpak
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whitescreen-flatpak
+          path: whitescreen.flatpak
+          if-no-files-found: error
+
+      - name: Add .flatpakrepo descriptor
+        run: |
+          set -eux
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          name="${GITHUB_REPOSITORY#*/}"
+          url="https://${owner}.github.io/${name}/"
+          # Tell Pages not to run the file through Jekyll, which would ignore
+          # some of the OSTree repository's files.
+          touch "$RUNNER_TEMP/repo/.nojekyll"
+          cat > "$RUNNER_TEMP/repo/whitescreen.flatpakrepo" <<EOF
+          [Flatpak Repo]
+          Title=White Screen (continuous)
+          Url=${url}
+          Homepage=https://github.com/${GITHUB_REPOSITORY}
+          Comment=Continuous builds of White Screen from the default branch
+          EOF
+          cat "$RUNNER_TEMP/repo/whitescreen.flatpakrepo"
+          echo "Repo will be served at ${url}"
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/repo
+
+      # Stable URL that always serves the newest default-branch build:
+      #   https://github.com/SergeGris/whitescreen/releases/download/continuous/whitescreen.flatpak
+      - name: Publish rolling "continuous" release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          # The tag is recreated so it points at the commit just built.
+          gh release delete continuous --yes --cleanup-tag || true
+          gh release create continuous whitescreen.flatpak \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Continuous build" \
+            --notes "Automatic build of \`${GITHUB_SHA}\`.
+
+          Preferred install (supports \`flatpak update\`):
+
+          \`\`\`sh
+          flatpak remote-add --user --no-gpg-verify whitescreen \\
+              https://sergegris.github.io/whitescreen/whitescreen.flatpakrepo
+          flatpak install --user whitescreen ${APP_ID}
+          \`\`\`
+
+          Or grab the bundle below for a one-off install; it does not auto-update."
+
+  deploy:
+    name: Deploy Flatpak repository
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
