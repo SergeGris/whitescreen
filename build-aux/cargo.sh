@@ -17,6 +17,15 @@ PROFILE="$4"
 BIN_NAME="$5"
 shift 5
 
+# Meson expands @OUTPUT@ to a path relative to the build directory, which is
+# the working directory ninja hands us. Resolve it now: the `cd` below would
+# otherwise make the copy land in the source tree, and `meson install` would
+# fail with "File 'whitescreen' could not be found".
+case "$OUTPUT" in
+  /*) ;;
+  *)  OUTPUT="$(pwd)/$OUTPUT" ;;
+esac
+
 CARGO_TARGET_DIR="$BUILD_ROOT/target"
 export CARGO_TARGET_DIR
 : "${CARGO_HOME:="$BUILD_ROOT/cargo-home"}"
