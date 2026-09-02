@@ -55,13 +55,23 @@ fn main() -> glib::ExitCode {
             // "unsupported", and knowing the backend and the library version
             // is the difference between "wrong compositor" and "GDK fell back
             // to X11 inside the sandbox".
+            eprintln!("whitescreen: gtk_layer_is_supported() = false");
             eprintln!(
-                "whitescreen: gtk_layer_is_supported() = false\n                   GDK display : {}\n                   XDG_SESSION_TYPE={:?} WAYLAND_DISPLAY={:?}\n                   gtk4-layer-shell {}.{}.{}",
+                "  GDK display         : {}",
                 gdk::Display::default()
                     .map(|d| d.type_().name().to_string())
                     .unwrap_or_else(|| "<none>".to_string()),
-                std::env::var("XDG_SESSION_TYPE").ok(),
-                std::env::var("WAYLAND_DISPLAY").ok(),
+            );
+            for (k, v) in [
+                ("XDG_SESSION_TYPE   ", "XDG_SESSION_TYPE"),
+                ("XDG_CURRENT_DESKTOP", "XDG_CURRENT_DESKTOP"),
+                ("WAYLAND_DISPLAY    ", "WAYLAND_DISPLAY"),
+                ("LD_PRELOAD         ", "LD_PRELOAD"),
+            ] {
+                eprintln!("  {} : {:?}", k, std::env::var(v).ok());
+            }
+            eprintln!(
+                "  gtk4-layer-shell    : {}.{}.{}",
                 gtk_layer_shell::major_version(),
                 gtk_layer_shell::minor_version(),
                 gtk_layer_shell::micro_version(),
