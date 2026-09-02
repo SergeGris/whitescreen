@@ -29,7 +29,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev \
-            meson ninja-build libwayland-dev wayland-protocols
+            meson ninja-build libwayland-dev wayland-protocols \
+            libgirepository1.0-dev gobject-introspection valac
 
       - name: Build and install gtk4-layer-shell
         run: |
@@ -41,10 +42,24 @@ jobs:
           tag="$(git tag -l 'v*' --sort=-v:refname | head -n1)"
           echo "Building gtk4-layer-shell $tag"
           git checkout "$tag"
-          # Retry with defaults if upstream ever renames one of these options.
-          meson setup build --prefix=/usr --buildtype=release \
-            -Dexamples=false -Ddocs=false -Dtests=false \
-            || meson setup --wipe build --prefix=/usr --buildtype=release
+          # Only pass -D flags the project actually declares, so this cannot
+          # break when upstream adds or renames an option. Anything not
+          # disabled here still builds: the introspection/vala toolchain is
+          # installed above precisely so the defaults work.
+          # Concatenate whichever options file this version uses (the name
+          # changed from meson_options.txt to meson.options upstream in meson),
+          # then probe the single result: passing two filenames to grep -q
+          # returns nonzero on a missing file in some greps even when the other
+          # file matches.
+          cat meson_options.txt meson.options 2>/dev/null > meson-opts.tmp || true
+          opts=""
+          for o in examples docs tests introspection vapi; do
+            if grep -qE "option\([[:space:]]*'$o'" meson-opts.tmp; then
+              opts="$opts -D$o=false"
+            fi
+          done
+          echo "meson options: $opts"
+          meson setup build --prefix=/usr --buildtype=release $opts
           ninja -C build
           sudo ninja -C build install
           sudo ldconfig

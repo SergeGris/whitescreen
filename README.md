@@ -74,10 +74,11 @@ release or a Flathub submission:
 - **Screenshot** — `data/io.github.SergeGris.WhiteScreen.metainfo.xml` points at
   `data/screenshots/main-window.png`, which does not exist yet. Flathub review
   rejects placeholder screenshots.
-- **gtk4-layer-shell pin** — `build-aux/io.github.SergeGris.WhiteScreen.json`
-  pins tag `v1.1.1`. Verify that tag exists and add the matching `commit` hash;
-  Flathub requires a fixed commit for git sources. (CI does not use this pin —
-  it resolves the newest release tag at build time.)
+- **gtk4-layer-shell commit hash** — `build-aux/io.github.SergeGris.WhiteScreen.json`
+  pins tag `v1.3.0` (confirmed to be the current release). Flathub additionally
+  requires a fixed `commit` for git sources; the commit for that tag begins
+  `1c963c5`, so add the full 40-character hash before submitting. (CI does not
+  use this pin — it resolves the newest release tag at build time.)
 - **Icons** — `data/icons/` contains hand-written SVGs that have not been
   reviewed at their rendered sizes (128px and 16px).
 
