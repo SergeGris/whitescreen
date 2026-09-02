@@ -106,6 +106,7 @@ screen itself, so you always know which physical panel you're looking at.
 
 | Variable | Effect |
 | -------- | ------ |
+| `LD_PRELOAD=/usr/lib/liblayer-shell-preload.so` | Use if the app reports *"Compositor not supported"* on a compositor that does support `wlr-layer-shell` (niri, Sway, Hyprland, KDE). gtk4-layer-shell interposes on `libwayland-client` and must be loaded first; link order does not guarantee that. The Flatpak build does this automatically via a wrapper. |
 | `WHITESCREEN_NO_GAMMA=1` | Do not start the gamma-control monitor. The indicator stays at "inactive". Use this to rule the background Wayland prober in or out when diagnosing a crash or hang. |
 
 Under Flatpak:

@@ -6,8 +6,7 @@
   "command": "whitescreen",
   "finish-args": [
     "--socket=wayland",
-    "--device=dri",
-    "--env=LD_PRELOAD=liblayer-shell-preload.so"
+    "--device=dri"
   ],
   "cleanup": [
     "/include",
@@ -57,7 +56,8 @@
         "rustc --version && cargo --version",
         "meson setup _flatpak_build --prefix=/app -Dbuildtype=release -Dgamma=true",
         "ninja -C _flatpak_build",
-        "ninja -C _flatpak_build install"
+        "ninja -C _flatpak_build install",
+        "mv /app/bin/whitescreen /app/bin/whitescreen-bin\ncat > /app/bin/whitescreen <<'WRAP'\n#!/bin/sh\n# gtk4-layer-shell interposes on libwayland-client and must be loaded before\n# it, or its protocol hook never installs and gtk_layer_is_supported() returns\n# false even on a compositor that implements the protocol. Rust link order does\n# not guarantee this. Setting LD_PRELOAD via the manifest does not work either:\n# flatpak clears it during sandbox setup. Doing it here, in-sandbox and\n# immediately before exec, is the one place it survives.\nfor d in /app/lib /app/lib64; do\n    if [ -f \"$d/liblayer-shell-preload.so\" ]; then\n        LD_PRELOAD=\"${LD_PRELOAD:+$LD_PRELOAD:}$d/liblayer-shell-preload.so\"\n        export LD_PRELOAD\n        break\n    fi\ndone\nexec /app/bin/whitescreen-bin \"$@\"\nWRAP\nchmod +x /app/bin/whitescreen"
       ],
       "sources": [
         {
