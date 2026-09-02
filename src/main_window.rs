@@ -761,9 +761,19 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                         });
                     }
                 });
-                self.imp().gamma_listener.replace(Some(GammaListener::new(move |e| {
-                    let _ = sender.send_blocking(e);
-                })));
+                // The prober opens its own Wayland connection on a background
+                // thread and polls the compositor. Setting WHITESCREEN_NO_GAMMA
+                // leaves the indicator at "inactive" and starts nothing, so the
+                // feature can be ruled in or out without a rebuild.
+                if std::env::var_os("WHITESCREEN_NO_GAMMA").is_none() {
+                    self.imp().gamma_listener.replace(Some(GammaListener::new(move |e| {
+                        let _ = sender.send_blocking(e);
+                    })));
+                } else {
+                    // Drop the sender so the receiver future above finishes
+                    // instead of parking forever.
+                    drop(sender);
+                }
             }
 
             // ── "Choose Color" card ───────────────────────────────────────

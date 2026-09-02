@@ -47,9 +47,12 @@ gamma = ["dep:wayland-client", "dep:wayland-protocols-wlr"]
 opt-level     = 3
 lto           = true
 codegen-units = 1
-strip         = "symbols"     # no debuginfo is emitted in release anyway
 panic         = "abort"       # smaller binary; no unwinding overhead
-
-# Distro packagers who want a separate -debug package should override with
-#   [profile.release] debug = "full", strip = "none"
-# or build with CARGO_PROFILE_RELEASE_DEBUG=full CARGO_PROFILE_RELEASE_STRIP=none.
+# Line tables only: enough for a symbolized backtrace with file:line, without
+# the size of full DWARF. Packaging that splits debuginfo (flatpak-builder's
+# eu-strip, or a distro -debug package) needs this to be present and unstripped
+# here; it strips the shipped binary itself. Plain `cargo build --release`
+# therefore produces a larger binary than before -- strip it yourself, or set
+# CARGO_PROFILE_RELEASE_DEBUG=false.
+debug         = "line-tables-only"
+strip         = "none"

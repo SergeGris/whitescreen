@@ -97,6 +97,27 @@ cargo build --release
 **Identify** flashes each monitor's connector name (`DP-1`, `HDMI-A-2`, …) on the
 screen itself, so you always know which physical panel you're looking at.
 
+## Troubleshooting
+
+| Variable | Effect |
+| -------- | ------ |
+| `WHITESCREEN_NO_GAMMA=1` | Do not start the gamma-control monitor. The indicator stays at "inactive". Use this to rule the background Wayland prober in or out when diagnosing a crash or hang. |
+
+Under Flatpak:
+
+```sh
+flatpak run --env=WHITESCREEN_NO_GAMMA=1 io.github.SergeGris.WhiteScreen
+```
+
+To get a symbolized backtrace, install the debug extension and run under gdb in
+the SDK:
+
+```sh
+flatpak install --user whitescreen io.github.SergeGris.WhiteScreen.Debug
+flatpak run --devel --command=gdb io.github.SergeGris.WhiteScreen \
+    -ex run -ex "thread apply all bt full"
+```
+
 ## Signing the repository
 
 The published repository is unsigned, which is why users pass
