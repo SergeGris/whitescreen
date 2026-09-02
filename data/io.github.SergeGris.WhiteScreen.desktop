@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=White Screen
+GenericName=Display Color Overlay
+Comment=Fill any monitor with a solid color
+Exec=whitescreen
+Icon=io.github.SergeGris.WhiteScreen
+Terminal=false
+Categories=Utility;GTK;
+Keywords=color;colour;screen;monitor;display;white;backlight;dead pixel;test;lighting;camera;
+StartupNotify=true
+StartupWMClass=io.github.SergeGris.WhiteScreen
+X-GNOME-UsesNotifications=false

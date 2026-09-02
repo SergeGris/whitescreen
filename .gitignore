@@ -1,0 +1,21 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Meson / Flatpak build trees
+/_build/
+/build/
+/.flatpak-builder/
+/repo/
+
+# Local scratch — not part of the project
+/.trash/
+/strace
+/Pasted image.png
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

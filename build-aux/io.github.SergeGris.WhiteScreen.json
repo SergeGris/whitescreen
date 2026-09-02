@@ -1,0 +1,62 @@
+{
+  "id": "io.github.SergeGris.WhiteScreen",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "48",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "whitescreen",
+  "finish-args": [
+    "--socket=wayland",
+    "--device=dri"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "build-args": [
+      "--share=network"
+    ],
+    "env": {
+      "CARGO_HOME": "/run/build/whitescreen/cargo"
+    }
+  },
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/share/gir-1.0",
+    "/share/vala",
+    "*.a",
+    "*.la"
+  ],
+  "modules": [
+    {
+      "name": "gtk4-layer-shell",
+      "buildsystem": "meson",
+      "config-opts": [
+        "-Dexamples=false",
+        "-Ddocs=false",
+        "-Dtests=false"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/wmww/gtk4-layer-shell.git",
+          "tag": "v1.1.1"
+        }
+      ]
+    },
+    {
+      "name": "whitescreen",
+      "buildsystem": "meson",
+      "config-opts": [
+        "-Dgamma=true"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../"
+        }
+      ]
+    }
+  ]
+}

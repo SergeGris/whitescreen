@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Sergey Sushilin -->
+<component type="desktop-application">
+  <id>io.github.SergeGris.WhiteScreen</id>
+
+  <name>White Screen</name>
+  <summary>Fill any monitor with a solid color</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <developer id="io.github.sergegris">
+    <name>Sergey Sushilin</name>
+  </developer>
+
+  <description>
+    <p>
+      White Screen fills one or more of your monitors with a flat, uniform color.
+      It is a purpose-built tool for the jobs where an ordinary maximized window
+      is not good enough: no title bar, no shadows, no wallpaper bleeding through,
+      and no cursor in the frame.
+    </p>
+    <p>Typical uses:</p>
+    <ul>
+      <li>Checking a panel for dead or stuck pixels</li>
+      <li>Inspecting LCD backlight bleed and clouding on a black or white field</li>
+      <li>Using a display as a soft key light for a webcam or camera</li>
+      <li>Eyeballing color uniformity and tint across several monitors</li>
+    </ul>
+    <p>
+      Pick a color from the presets or the full color picker, choose which
+      monitors to cover, and the overlay appears on each of them. Press Escape to
+      dismiss it. The Identify button labels every screen with its connector name
+      so you always know which physical panel you are looking at.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.SergeGris.WhiteScreen.desktop</launchable>
+
+  <url type="homepage">https://github.com/SergeGris/whitescreen</url>
+  <url type="bugtracker">https://github.com/SergeGris/whitescreen/issues</url>
+  <url type="vcs-browser">https://github.com/SergeGris/whitescreen</url>
+
+  <content_rating type="oars-1.1" />
+
+  <supports>
+    <control>pointer</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">560</display_length>
+  </requires>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#f6f5f4</color>
+    <color type="primary" scheme_preference="dark">#241f31</color>
+  </branding>
+
+  <!-- TODO: replace with real screenshots before submitting to Flathub;
+       appstreamcli will warn, and Flathub review will reject placeholders. -->
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/SergeGris/whitescreen/main/data/screenshots/main-window.png</image>
+      <caption>Choosing a color and the monitors to cover</caption>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release version="1.0.0" date="2026-09-02">
+      <description>
+        <p>First packaged release.</p>
+        <ul>
+          <li>Solid-color overlay on any combination of monitors</li>
+          <li>Color presets plus a full custom color picker</li>
+          <li>Identify mode showing each monitor's connector name</li>
+          <li>Optional indicator for external gamma / night-light filters</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

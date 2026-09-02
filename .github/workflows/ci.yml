@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    name: Build and lint (${{ matrix.features }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["default", "gamma"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.features }}" = "gamma" ]; then
+            cargo build --locked --features gamma
+          else
+            cargo build --locked
+          fi
+
+      - name: Clippy
+        run: |
+          if [ "${{ matrix.features }}" = "gamma" ]; then
+            cargo clippy --locked --features gamma --all-targets
+          else
+            cargo clippy --locked --all-targets
+          fi
+
+      - name: Test
+        run: cargo test --locked
+
+  data:
+    name: Validate desktop entry and AppStream metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            desktop-file-utils appstream
+
+      - name: Validate .desktop
+        run: desktop-file-validate data/io.github.SergeGris.WhiteScreen.desktop
+
+      - name: Validate AppStream metainfo
+        run: appstreamcli validate --no-net --explain data/io.github.SergeGris.WhiteScreen.metainfo.xml

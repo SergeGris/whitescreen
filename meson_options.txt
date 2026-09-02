@@ -1,0 +1,6 @@
+option(
+  'gamma',
+  type: 'boolean',
+  value: false,
+  description: 'Watch zwlr-gamma-control-v1 and report when another client holds a colour filter',
+)

@@ -1,0 +1,55 @@
+[package]
+name         = "whitescreen"
+version      = "1.0.0"
+edition      = "2021"
+rust-version = "1.92"                 # floor imposed by gtk4 0.11 / glib 0.22
+description  = "Fill any monitor with a solid color — for camera tests, lighting, and backlight checks"
+authors      = ["Sergey Sushilin <sushilinsergey@gmail.com>"]
+license      = "GPL-3.0-or-later"
+readme       = "README.md"
+repository   = "https://github.com/SergeGris/whitescreen"
+homepage     = "https://github.com/SergeGris/whitescreen"
+keywords     = ["gtk4", "wayland", "layer-shell", "color", "screen"]
+categories   = ["gui"]
+
+# Packaging data is installed by Meson, not by cargo — keep it out of the
+# published crate tarball.
+exclude = [
+    "/.github",
+    "/build-aux",
+    "/data",
+    "/meson.build",
+    "/meson_options.txt",
+]
+
+[[bin]]
+name = "whitescreen"
+path = "src/main.rs"
+
+[dependencies]
+# v4_14 is the true floor: gdk::Monitor::scale() is the newest API used.
+gtk             = { version = "0.11.2", package = "gtk4", features = ["v4_14"] }
+gtk_layer_shell = { version = "0.8.0",  package = "gtk4-layer-shell" }
+adw             = { version = "0.9.1",  package = "libadwaita", features = ["v1_5"] }
+async-channel   = "2.5.0"
+
+# ── `gamma` feature only ──────────────────────────────────────────────────────
+wayland-client        = { version = "0.31.14", optional = true }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"], optional = true }
+
+[features]
+default = []
+# Watch zwlr-gamma-control-v1 to report when another client (wlsunset,
+# gammastep, wl-gammarelay, …) holds a colour filter.
+gamma = ["dep:wayland-client", "dep:wayland-protocols-wlr"]
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = "symbols"     # no debuginfo is emitted in release anyway
+panic         = "abort"       # smaller binary; no unwinding overhead
+
+# Distro packagers who want a separate -debug package should override with
+#   [profile.release] debug = "full", strip = "none"
+# or build with CARGO_PROFILE_RELEASE_DEBUG=full CARGO_PROFILE_RELEASE_STRIP=none.
