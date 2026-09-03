@@ -1,0 +1,23 @@
+pkgbase = whitescreen-git
+	pkgdesc = Fill any monitor with a solid color — for camera tests, lighting, and backlight checks
+	pkgver = 1.0.0.r0.g0000000
+	pkgrel = 1
+	url = https://github.com/SergeGris/whitescreen
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-or-later
+	checkdepends = desktop-file-utils
+	checkdepends = appstream
+	makedepends = git
+	makedepends = meson
+	makedepends = ninja
+	makedepends = rust
+	depends = gtk4
+	depends = libadwaita
+	depends = gtk4-layer-shell
+	provides = whitescreen=1.0.0.r0.g0000000
+	conflicts = whitescreen
+	source = whitescreen::git+https://github.com/SergeGris/whitescreen.git
+	sha256sums = SKIP
+
+pkgname = whitescreen-git

@@ -106,6 +106,11 @@ mod imp {
             // Blank cursor on every map (show), not just the first realize.
             // connect_realize would accumulate handlers on repeated show calls.
             win.connect_map(|w| {
+                // gtk_native_get_surface() is only null-checked by the binding,
+                // so an unrealized window can hand back a stale pointer and any
+                // call on it trips "assertion 'GDK_IS_SURFACE (surface)' failed"
+                // and then segfaults. Gate every surface access on is_realized().
+                if !w.is_realized() { return; }
                 if let Some(surface) = w.surface() {
                     surface.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
                 }
@@ -196,8 +201,13 @@ mod imp {
         /// been shown (no live GdkSurface) and during app shutdown.
         pub fn hide_overlay(&self) {
             if !self.is_visible() { return; }
-            if let Some(surface) = self.surface() {
-                surface.set_cursor(None);
+            // Restoring the cursor is cosmetic; skip it rather than touch a
+            // surface that may already be gone (teardown, or a layer-shell
+            // remap triggered by set_monitor()).
+            if self.is_realized() {
+                if let Some(surface) = self.surface() {
+                    surface.set_cursor(None);
+                }
             }
             self.set_visible(false);
         }

@@ -8,14 +8,15 @@
 /.flatpak-builder/
 /repo/
 
-# Local scratch — not part of the project
-/.trash/
-/strace
-/Pasted image.png
-*.log
-
 # Editor / OS
 .vscode/
 .idea/
 *.swp
 .DS_Store
+
+# makepkg build artifacts
+/packaging/arch/pkg/
+/packaging/arch/src/
+/packaging/arch/whitescreen/
+/packaging/arch/*.pkg.tar.*
+/packaging/arch/*.log

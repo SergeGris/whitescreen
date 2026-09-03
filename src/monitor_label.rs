@@ -108,6 +108,7 @@ mod imp {
 
             // Make the badge click-through (input events pass to layers below).
             win.connect_realize(|w| {
+                if !w.is_realized() { return; }
                 if let Some(surface) = w.surface() {
                     let empty = gtk::cairo::Region::create();
                     surface.set_input_region(Some(&empty));

@@ -1,0 +1,51 @@
+# Maintainer: Sergey Sushilin <sushilinsergey@gmail.com>
+
+pkgname=whitescreen-git
+_pkgname=whitescreen
+pkgver=1.0.0.r23.g4d374fa
+pkgrel=1
+pkgdesc="Fill any monitor with a solid color — for camera tests, lighting, and backlight checks"
+arch=('x86_64' 'aarch64')
+url="https://github.com/SergeGris/whitescreen"
+license=('GPL-3.0-or-later')
+depends=('gtk4' 'libadwaita' 'gtk4-layer-shell')
+makedepends=('git' 'meson' 'ninja' 'rust')
+checkdepends=('desktop-file-utils' 'appstream')
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$_pkgname"
+    local ver
+    ver=$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)
+    printf '%s.r%s.g%s' "$ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$_pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    # Fetch here so build() can run without network.
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    export RUSTUP_TOOLCHAIN=stable
+    #export CARGO_NET_OFFLINE=true
+    # arch-meson passes --buildtype=plain, which meson.build maps to cargo's
+    # release profile (only a literal 'debug' buildtype selects the dev one).
+    arch-meson "$_pkgname" build -Dgamma=true
+    meson compile -C build
+}
+
+check() {
+    # Validates the .desktop entry and the AppStream metainfo. Skipped
+    # automatically when the validators are absent.
+    meson test -C build --print-errorlogs
+}
+
+package() {
+    meson install -C build --destdir "$pkgdir"
+    install -Dm644 "$_pkgname/COPYING" "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+}

@@ -151,6 +151,13 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
             pub identify: Cell<bool>,
 
             // Widgets that outlive build_ui because hot-plug has to update them.
+            /// Windows for monitors that have gone away. They are hidden but
+            /// deliberately never destroyed and never detached from the
+            /// application: both routes go through gtk_application_remove_window(),
+            /// whose handler dereferences a surface these windows may never have
+            /// had. Holding them costs one hidden window per unplug.
+            pub graveyard: RefCell<Vec<MonitorEntry>>,
+
             pub mon_box:   RefCell<Option<gtk::Box>>,
             pub show_btn:  RefCell<Option<gtk::Button>>,
             pub preview:   RefCell<Option<color_surface::ColorSurface>>,
@@ -167,6 +174,7 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                     selected: RefCell::new(HashSet::new()),
                     color:    Cell::new(gdk::RGBA::WHITE),
                     identify: Cell::new(false),
+                    graveyard: RefCell::new(Vec::new()),
                     mon_box:  RefCell::new(None),
                     show_btn: RefCell::new(None),
                     preview:  RefCell::new(None),
@@ -855,13 +863,41 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                 #[weak(rename_to = win)] self,
                 #[upgrade_or] glib::Propagation::Proceed,
                 move |_| {
-                    // NB: no show_on_monitor(None) here. That call *presents*
-                    // the window, so the old teardown flashed every overlay
-                    // full-screen on the way out.
-                    for e in win.imp().entries.take() {
-                        e.overlay.hide_overlay();
-                        e.overlay.destroy();
-                        e.label.destroy();
+                    // Do NOT destroy() the overlays and badges here.
+                    //
+                    // They are layer-shell windows, and most of them have never
+                    // been realized -- one is created per monitor at startup,
+                    // but only shown on demand. gtk_window_destroy() on such a
+                    // window emits a signal whose handler calls
+                    // gdk_surface_get_display() on a surface that does not
+                    // exist, giving
+                    //   Gdk-CRITICAL gdk_surface_get_display:
+                    //   assertion 'GDK_IS_SURFACE (surface)' failed
+                    // and then a segfault.
+                    //
+                    // Hiding them and quitting is also a clearer statement of
+                    // intent: the destroy() calls only existed to drop the
+                    // application's window count to zero so that closing the
+                    // main window ended the program. Saying so directly is
+                    // both safer and more obvious.
+                    //
+                    // NB: no show_on_monitor(None) either -- that call
+                    // *presents* the window, so an older version of this
+                    // teardown flashed every overlay full-screen on the way out.
+                    for ov in win.overlays() {
+                        ov.hide_overlay();
+                    }
+                    for l in win.labels() {
+                        l.set_visible(false);
+                    }
+
+                    // Stop the gamma prober thread deterministically rather
+                    // than leaving it to process exit.
+                    #[cfg(feature = "gamma")]
+                    win.imp().gamma_listener.replace(None);
+
+                    if let Some(app) = win.application() {
+                        app.quit();
                     }
                     glib::Propagation::Proceed
                 }
@@ -993,12 +1029,13 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                 }
             }
 
-            // Whatever is left in `old` was unplugged.
-            for e in old {
+            // Whatever is left in `old` was unplugged. Hide it and retire it;
+            // see MainWindow::graveyard for why it is not destroyed.
+            for e in &old {
                 e.overlay.hide_overlay();
-                e.overlay.destroy();
-                e.label.destroy();
+                e.label.set_visible(false);
             }
+            self.imp().graveyard.borrow_mut().extend(old);
 
             // Drop selections for monitors that no longer exist, and select the
             // first monitor when nothing is selected (including first run).

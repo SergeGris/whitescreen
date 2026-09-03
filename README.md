@@ -78,6 +78,37 @@ itself is still over HTTPS. See *Signing the repository* below.
 > Actions** to be enabled once. Until then the deploy job fails and the URL
 > above 404s.
 
+### Arch Linux / CachyOS
+
+A PKGBUILD lives in `packaging/arch/`. It builds the default branch, so no AUR
+account or published release is needed:
+
+```sh
+curl -O https://raw.githubusercontent.com/SergeGris/whitescreen/master/packaging/arch/PKGBUILD
+makepkg -si
+```
+
+Or from a clone:
+
+```sh
+git clone https://github.com/SergeGris/whitescreen.git
+cd whitescreen/packaging/arch
+makepkg -si
+```
+
+`makepkg` clones the repository itself, so it always builds current `master`
+regardless of the checkout you launched it from. Re-run it to update.
+
+Once the package is published to the AUR it installs the usual way:
+
+```sh
+yay -S whitescreen-git
+```
+
+To publish it: clone `ssh://aur@aur.archlinux.org/whitescreen-git.git`, copy in
+`PKGBUILD`, regenerate the metadata with `makepkg --printsrcinfo > .SRCINFO`,
+then commit and push both files.
+
 ### One-off bundle (no auto-update)
 
 ```sh
