@@ -110,9 +110,15 @@ mod imp {
             win.connect_realize(|w| {
                 if !w.is_realized() { return; }
                 if let Some(surface) = w.surface() {
+                    // Empty input region: clicks fall through to the layers
+                    // below, so a badge never intercepts a click meant for the
+                    // overlay or the desktop underneath it.
+                    //
+                    // The opaque region is deliberately left to GTK: the badge
+                    // background is translucent (alpha 0.90), so GTK already
+                    // computes an empty one and overriding it gains nothing.
                     let empty = gtk::cairo::Region::create();
                     surface.set_input_region(Some(&empty));
-                    // TODO surface.set_opaque_region(Some(&empty));
                 }
             });
         }

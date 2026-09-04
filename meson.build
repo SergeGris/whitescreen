@@ -14,8 +14,12 @@ prefix     = get_option('prefix')
 bindir     = prefix / get_option('bindir')
 datadir    = prefix / get_option('datadir')
 
-cargo_env = environment()
-cargo_env.set('CARGO_HOME', meson.project_build_root() / 'cargo-home')
+# CARGO_HOME is deliberately NOT set here. build-aux/cargo.sh defaults it to
+# <builddir>/cargo-home when the environment does not provide one, which keeps
+# a plain `meson compile` self-contained. Setting it here would override a
+# packager's own CARGO_HOME -- and distro packaging typically primes that cache
+# in a separate prepare step, so the override made that fetch prime a directory
+# the build then ignored, re-downloading every crate.
 
 cargo_options = ['--manifest-path', meson.project_source_root() / 'Cargo.toml']
 
@@ -41,7 +45,6 @@ cargo_build = custom_target(
   console: true,
   install: true,
   install_dir: bindir,
-  env: cargo_env,
   command: [
     meson.project_source_root() / 'build-aux' / 'cargo.sh',
     meson.project_build_root(),

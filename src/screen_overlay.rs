@@ -1,4 +1,3 @@
-
 use std::{cell::Cell, cell::RefCell, time::Duration};
 
 use adw::{prelude::*, subclass::prelude::*};

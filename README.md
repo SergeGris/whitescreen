@@ -18,11 +18,6 @@ things an ordinary maximized window can't give you.
 White Screen is a Wayland application. It needs a compositor implementing
 **`wlr-layer-shell`**:
 
-The Flatpak build targets the `org.gnome.Platform` runtime pinned in
-`build-aux/io.github.SergeGris.WhiteScreen.json`. GNOME runtimes go end-of-life
-about a year after release, so that pin needs bumping periodically; CI prints
-the runtime's status on every build and fails if the branch is gone.
-
 | Compositor | Supported |
 | ---------- | --------- |
 | Niri, Sway, Hyprland, Wayfire, river | yes |
@@ -40,7 +35,7 @@ Build-time dependencies:
 
 ## Building
 
-### With Meson (recommended — installs the desktop entry, icons, and metadata)
+### With Meson (installs the desktop entry, icons, and metadata)
 
 ```sh
 meson setup _build --prefix=/usr/local
@@ -54,7 +49,7 @@ Options:
 | ------ | ------- | ----------- |
 | `-Dgamma=true` | `false` | Watch `zwlr-gamma-control-v1` and show when another client (wlsunset, gammastep, wl-gammarelay) holds a color filter |
 
-### From the project's Flatpak repository (recommended)
+### From the project's Flatpak repository (recommended — supports `flatpak update`)
 
 Every push to the default branch publishes an OSTree repository to GitHub
 Pages, so ordinary `flatpak update` works. Add the remote once:
@@ -73,6 +68,11 @@ flatpak update
 
 `--no-gpg-verify` is needed because the repository is unsigned; the download
 itself is still over HTTPS. See *Signing the repository* below.
+
+The Flatpak build targets the `org.gnome.Platform` runtime pinned in
+`build-aux/io.github.SergeGris.WhiteScreen.json`. GNOME runtimes go end-of-life
+about a year after release, so that pin needs bumping periodically; CI prints
+the runtime's status on every build and fails if the branch is gone.
 
 > **Repository owner:** this requires **Settings → Pages → Source = GitHub
 > Actions** to be enabled once. Until then the deploy job fails and the URL
@@ -137,7 +137,7 @@ screen itself, so you always know which physical panel you're looking at.
 
 | Variable | Effect |
 | -------- | ------ |
-| `LD_PRELOAD=/usr/lib/liblayer-shell-preload.so` | Use if the app reports *"Compositor not supported"* on a compositor that does support `wlr-layer-shell` (niri, Sway, Hyprland, KDE). gtk4-layer-shell interposes on `libwayland-client` and must be loaded first; link order does not guarantee that. The Flatpak build does this automatically via a wrapper. |
+| `LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so` | Last-resort workaround if the app reports *"Compositor not supported"* on a compositor that does support `wlr-layer-shell` (niri, Sway, Hyprland, KDE). gtk4-layer-shell interposes on `libwayland-client` and has to be loaded first. This binary links it directly, so the normal load order already satisfies that — needing this points at an unusual loader setup. Adjust the path to wherever your distribution installs the library. |
 | `WHITESCREEN_NO_GAMMA=1` | Do not start the gamma-control monitor. The indicator stays at "inactive". Use this to rule the background Wayland prober in or out when diagnosing a crash or hang. |
 
 Under Flatpak:
