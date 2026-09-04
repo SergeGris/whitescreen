@@ -23,6 +23,11 @@ mod imp {
         pub toast_overlay:    adw::ToastOverlay,
         pub notice_visible:   Cell<bool>,
         pub last_pointer_pos: RefCell<Option<(f64, f64)>>,
+        /// Monitor this window is currently showing on.
+        ///
+        /// Tracked here rather than read back from `LayerShell::monitor()`,
+        /// because in fallback mode there is no layer-shell surface to ask.
+        pub bound:            RefCell<Option<gdk::Monitor>>,
     }
 
     impl Default for ScreenOverlay {
@@ -33,6 +38,7 @@ mod imp {
                 toast_overlay:   adw::ToastOverlay::new(),
                 notice_visible:  Cell::new(false),
                 last_pointer_pos: RefCell::new(None),
+                bound:           RefCell::new(None),
             }
         }
     }
@@ -52,7 +58,13 @@ mod imp {
             self.notice_visible.set(true);
 
             let toast = adw::Toast::builder()
-                .title("Press ESC to exit")
+                .title(if crate::layer_shell_available() {
+                    "Press ESC to exit"
+                } else {
+                    // Fallback overlays are ordinary windows, so only the
+                    // focused one hears ESC; clicking works on any of them.
+                    "Press ESC or click to exit"
+                })
                 .timeout(super::NOTICE_TIMEOUT.as_secs() as u32)
                 .build();
 
@@ -85,16 +97,25 @@ mod imp {
             self.parent_constructed();
             let win = self.obj();
 
-            // ── Layer shell ────────────────────────────────────────────
-            win.init_layer_shell();
-            win.set_namespace(Some("whitescreen-overlay"));
-            win.set_layer(Layer::Overlay);
-            // Exclusive: window owns the full keyboard seat while visible.
-            // Without this, ESC is never delivered on most compositors.
-            win.set_keyboard_mode(KeyboardMode::Exclusive);
-            win.set_exclusive_zone(-1);
-            for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-                win.set_anchor(edge, true);
+            // ── Layer shell, or a plain fullscreen window ──────────────
+            //
+            // Nothing below the anchoring differs between the two: the
+            // colour, the ESC handling and the blank cursor are the same
+            // window either way. What fallback mode gives up is stacking
+            // above everything else -- a fullscreen window is only above the
+            // windows it covers, so a notification or an on-screen keyboard
+            // can still appear over the colour.
+            if crate::layer_shell_available() {
+                win.init_layer_shell();
+                win.set_namespace(Some("whitescreen-overlay"));
+                win.set_layer(Layer::Overlay);
+                // Exclusive: window owns the full keyboard seat while visible.
+                // Without this, ESC is never delivered on most compositors.
+                win.set_keyboard_mode(KeyboardMode::Exclusive);
+                win.set_exclusive_zone(-1);
+                for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+                    win.set_anchor(edge, true);
+                }
             }
             win.set_decorated(false);
 
@@ -141,11 +162,27 @@ mod imp {
             ));
             win.add_controller(esc);
 
-            // ── Input: swallow all clicks ──────────────────────────────
-            let swallow = gtk::GestureClick::new();
-            swallow.set_propagation_phase(gtk::PropagationPhase::Capture);
-            swallow.connect_pressed(|_, _, _, _| {});
-            win.add_controller(swallow);
+            // ── Input: clicks ──────────────────────────────────────────
+            let click = gtk::GestureClick::new();
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            if crate::layer_shell_available() {
+                // Swallow them: the overlay covers the desktop, and a click
+                // that fell through would land on whatever is underneath.
+                click.connect_pressed(|_, _, _, _| {});
+            } else {
+                // In fallback mode each overlay is a separate toplevel and
+                // only the focused one receives ESC, so a click has to be a
+                // way out -- otherwise the overlays on the other screens can
+                // only be dismissed by finding the main window again.
+                click.connect_pressed(glib::clone!(
+                    #[weak] win,
+                    move |_, _, _, _| match win.application() {
+                        Some(app) => app.activate_action("hide-overlays", None),
+                        None      => win.hide_overlay(),
+                    }
+                ));
+            }
+            win.add_controller(click);
 
             // ── Input: show toast on mouse movement ────────────────────
             // Only re-arms after 16 px of travel to avoid noise from
@@ -186,13 +223,23 @@ mod imp {
         pub fn show_on_monitor(&self, monitor: Option<&gdk::Monitor>) {
             // Reset motion baseline so the notice re-arms on first move.
             self.imp().last_pointer_pos.borrow_mut().take();
-            // Only touch the layer-shell monitor when it actually changes.
+
+            // Only re-target when the monitor actually changes.
             // gtk_layer_set_monitor() re-creates the surface of a mapped
             // window, and sync_monitors() re-shows every already-visible
             // overlay after each hot-plug -- unconditionally setting it would
             // make every screen flicker whenever any monitor is plugged in.
-            if self.monitor().as_ref() != monitor {
-                self.set_monitor(monitor);
+            let moved = self.imp().bound.borrow().as_ref() != monitor;
+            if moved {
+                self.imp().bound.replace(monitor.cloned());
+                if crate::layer_shell_available() {
+                    self.set_monitor(monitor);
+                } else if let Some(monitor) = monitor {
+                    // Ask for the monitor before mapping: gtk_window_fullscreen_on_monitor()
+                    // on an already-mapped window has to unmap and remap it on
+                    // some compositors, which is the flicker the guard avoids.
+                    self.fullscreen_on_monitor(monitor);
+                }
             }
             self.present();
             if self.is_realized() {
@@ -210,7 +257,10 @@ mod imp {
         /// next map or by MonitorLabel::rebind(). None is the layer-shell default:
         /// "let the compositor choose".
         pub fn unbind_monitor(&self) {
-            self.set_monitor(None);
+            self.imp().bound.replace(None);
+            if crate::layer_shell_available() {
+                self.set_monitor(None);
+            }
         }
 
         /// Dismiss the overlay and restore the default cursor.

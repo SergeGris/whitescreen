@@ -50,19 +50,24 @@ mod imp {
             self.parent_constructed();
             let win = self.obj();
 
-            win.init_layer_shell();
-            win.set_namespace(Some("whitescreen-monlabel"));
-            // Same layer as ScreenOverlay: on Layer::Top the badge would be
-            // painted *underneath* a shown overlay and never be visible.
-            // Within a layer the compositor stacks by map order, so the badges
-            // are re-presented after the overlays (see MainWindow::show_selected).
-            win.set_layer(Layer::Overlay);
-            win.set_keyboard_mode(KeyboardMode::None);
-            win.set_exclusive_zone(0);
-            win.set_anchor(Edge::Bottom, true);
-            win.set_anchor(Edge::Right,  true);
-            win.set_margin(Edge::Bottom, 24);
-            win.set_margin(Edge::Right,  24);
+            // Without layer shell the badge is built but never shown; see
+            // present_badge(). Every call below would fail an assertion on a
+            // window that skipped init_layer_shell().
+            if crate::layer_shell_available() {
+                win.init_layer_shell();
+                win.set_namespace(Some("whitescreen-monlabel"));
+                // Same layer as ScreenOverlay: on Layer::Top the badge would be
+                // painted *underneath* a shown overlay and never be visible.
+                // Within a layer the compositor stacks by map order, so the badges
+                // are re-presented after the overlays (see MainWindow::show_selected).
+                win.set_layer(Layer::Overlay);
+                win.set_keyboard_mode(KeyboardMode::None);
+                win.set_exclusive_zone(0);
+                win.set_anchor(Edge::Bottom, true);
+                win.set_anchor(Edge::Right,  true);
+                win.set_margin(Edge::Bottom, 24);
+                win.set_margin(Edge::Right,  24);
+            }
             win.set_decorated(false);
             win.add_css_class(css_class::MONLABEL_WINDOW);
 
@@ -144,9 +149,24 @@ impl MonitorLabel {
         subtitle: Option<&str>,
     ) -> Self {
         let obj: Self = glib::Object::builder().property("application", app).build();
-        obj.set_monitor(Some(monitor));
+        if crate::layer_shell_available() {
+            obj.set_monitor(Some(monitor));
+        }
         obj.set_info(title, subtitle);
         obj
+    }
+
+    /// Show the badge, if the compositor can place it.
+    ///
+    /// A no-op in fallback mode: an ordinary window cannot be anchored to one
+    /// monitor's corner and made click-through, so rather than presenting a
+    /// stray window in the middle of a screen the feature stands down. The
+    /// Identify toggle is insensitive there, and the window says why.
+    pub fn present_badge(&self) {
+        if !crate::layer_shell_available() {
+            return;
+        }
+        self.present();
     }
 
     /// Update the badge text in place.
@@ -179,7 +199,9 @@ impl MonitorLabel {
     /// next map or by MonitorLabel::rebind(). None is the layer-shell default:
     /// "let the compositor choose".
     pub fn unbind_monitor(&self) {
-        self.set_monitor(None);
+        if crate::layer_shell_available() {
+            self.set_monitor(None);
+        }
     }
 
     /// Point an existing badge at a monitor that has just come back, so a
@@ -189,7 +211,7 @@ impl MonitorLabel {
     /// gtk_layer_set_monitor() re-creates the surface of a mapped window, so
     /// calling it unconditionally would flicker every badge on any hot-plug.
     pub fn rebind(&self, monitor: &gdk::Monitor, title: &str, subtitle: Option<&str>) {
-        if self.monitor().as_ref() != Some(monitor) {
+        if crate::layer_shell_available() && self.monitor().as_ref() != Some(monitor) {
             self.set_monitor(Some(monitor));
         }
         self.set_info(title, subtitle);

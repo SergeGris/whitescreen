@@ -1,4 +1,4 @@
-use std::{cell::Cell, cell::RefCell, collections::HashSet, rc::Rc};
+use std::{cell::Cell, cell::RefCell, collections::HashSet};
 
 use adw::{prelude::*, subclass::prelude::*};
 use gtk::{gdk, gio, glib};
@@ -6,6 +6,7 @@ use gtk::{gdk, gio, glib};
 use crate::color_surface;
 use crate::monitor_label;
 use crate::screen_overlay::ScreenOverlay;
+use crate::settings::Settings;
 
 #[cfg(feature = "gamma")]
 use crate::gamma::GammaListener;
@@ -13,6 +14,27 @@ use crate::gamma::GammaListener;
 // Minimum preview size; it expands to fill the pane.
 const PREVIEW_W: i32 = 480;
 const PREVIEW_H: i32 = 270; // 16:9
+
+/// Colour the custom chip starts on. Cyan rather than white so the chip is
+/// visibly *not* one of the presets on a first run, and so clicking it does
+/// something even before the picker has ever been opened.
+const DEFAULT_CUSTOM: gdk::RGBA = gdk::RGBA::new(0.0, 1.0, 1.0, 1.0);
+
+/// Name stored in the settings file when the custom chip is the selected one.
+const CUSTOM_CHIP: &str = "Custom";
+
+/// Shown by whatever is asked to keep the screen on, where it displays a
+/// reason -- so it says something the user would recognise.
+const IDLE_REASON: &str = "A color overlay is showing";
+
+/// Cycle bounds, in seconds. The floor is 0.5 s deliberately: a full-screen
+/// colour flashing faster than that starts to approach the flash rate that
+/// photosensitive-epilepsy guidance warns about, and no dead-pixel check
+/// needs it.
+const CYCLE_MIN:     f64 = 0.5;
+const CYCLE_MAX:     f64 = 60.0;
+const CYCLE_STEP:    f64 = 0.5;
+const CYCLE_DEFAULT: f64 = 2.0;
 
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     use std::f64::consts::{FRAC_PI_2, PI};
@@ -222,6 +244,40 @@ mod imp {
         pub show_btn:  RefCell<Option<gtk::Button>>,
         pub preview:   RefCell<Option<color_surface::ColorSurface>>,
 
+        /// Preset chips in `PRESETS` order, so the cycle timer can drive the
+        /// selection through the same widgets the user clicks.
+        pub presets:    RefCell<Vec<gtk::CheckButton>>,
+        pub custom_btn: RefCell<Option<gtk::CheckButton>>,
+        /// Colour behind the custom chip. Kept here rather than in the chip's
+        /// closure so the swatch, the picker and the saved settings all read
+        /// the same value.
+        pub custom_rgba: Cell<gdk::RGBA>,
+
+        /// Cycle mode: step through the presets on a timer, for spotting a
+        /// dead pixel or a stuck subpixel without clicking through by hand.
+        pub cycling:       Cell<bool>,
+        pub cycle_index:   Cell<usize>,
+        pub cycle_secs:    Cell<f64>,
+        pub cycle_source:  RefCell<Option<glib::SourceId>>,
+        /// Chip that was selected when cycling started, restored when it
+        /// stops, so the mode leaves the colour it found rather than
+        /// whichever preset the timer happened to land on.
+        pub pre_cycle:     RefCell<Option<gtk::CheckButton>>,
+
+        /// Cleared after the first reconcile; see sync_monitors().
+        pub first_sync: Cell<bool>,
+
+        /// Persisted colour / selection / interval.
+        pub settings: Settings,
+
+        /// Cookie from `gtk_application_inhibit()`; 0 means "not inhibiting".
+        pub idle_cookie: Cell<u32>,
+        /// Overlay the inhibitor is attached to. Which window it names
+        /// matters: the compositor only honours an inhibitor while that
+        /// window is actually on screen, so it has to be an overlay and not
+        /// the main window, which is behind them (or on another workspace).
+        pub idle_window: RefCell<Option<ScreenOverlay>>,
+
         #[cfg(feature = "gamma")]
         pub gamma_listener: RefCell<Option<GammaListener>>,
     }
@@ -240,6 +296,18 @@ mod imp {
                 mon_box:  RefCell::new(None),
                 show_btn: RefCell::new(None),
                 preview:  RefCell::new(None),
+                presets:     RefCell::new(Vec::new()),
+                custom_btn:  RefCell::new(None),
+                custom_rgba: Cell::new(super::DEFAULT_CUSTOM),
+                cycling:      Cell::new(false),
+                cycle_index:  Cell::new(0),
+                cycle_secs:   Cell::new(super::CYCLE_DEFAULT),
+                cycle_source: RefCell::new(None),
+                pre_cycle:    RefCell::new(None),
+                first_sync:   Cell::new(true),
+                settings: Settings::load(),
+                idle_cookie: Cell::new(0),
+                idle_window: RefCell::new(None),
                 #[cfg(feature = "gamma")]
                 gamma_listener: RefCell::new(None),
             }
@@ -286,8 +354,13 @@ impl MainWindow {
         css.load_from_string(r#"
 /* ── Preset / custom chips ──────────────────────────────────────────── */
 
-/* Hide the native indicator — selection is shown by the border. */
-.preset-chip check {
+/* Hide the native indicator — selection is shown by the border.
+   A grouped GtkCheckButton renames its indicator node from "check" to
+   "radio", so the chips (which are one radio group) need both selectors:
+   with only "check" every chip drew a stray radio circle next to its
+   swatch. The monitor rows are ungrouped and keep the "check" node. */
+.preset-chip check,
+.preset-chip radio {
     min-width: 0; min-height: 0; -gtk-icon-size: 0px;
     opacity: 0; padding: 0; margin: 0;
 }
@@ -303,15 +376,15 @@ impl MainWindow {
 .preset-chip:active  { transform: scale(0.97); }
 .color-label         { font-size: 12px; font-weight: 600; opacity: 0.85; }
 
-/* Custom eyedropper swatch */
-.custom-swatch-icon {
-    border: 2px solid alpha(@window_fg_color, 0.20);
-    border-radius: 12px;
+/* Custom chip: the swatch shows the colour it will apply, with the
+   eyedropper floated on top so the chip still reads as "pick a colour".
+   The badge carries its own background because it sits on an arbitrary
+   colour -- a bare symbolic icon disappears against half of them. */
+.custom-swatch-badge {
+    background: alpha(@window_bg_color, 0.85);
     color: @window_fg_color;
-}
-.preset-chip:checked .custom-swatch-icon {
-    border-color: @accent_bg_color;
-    color: @accent_bg_color;
+    border-radius: 999px;
+    padding: 5px;
 }
 
 /* ── Monitor rows ───────────────────────────────────────────────────── */
@@ -375,9 +448,10 @@ impl MainWindow {
 
 /* ── Preview ────────────────────────────────────────────────────────── */
 
+/* No `overflow: hidden` here: GTK's CSS has no such property, and it was
+   logged as a parser error on every start. Clipping is the frame's own job. */
 .preview-frame {
     border-radius: 14px;
-    overflow: hidden;
     box-shadow: 0 6px 20px rgba(0,0,0,0.30);
 }
 
@@ -496,6 +570,15 @@ impl MainWindow {
             #[weak(rename_to = win)] self,
             move |btn| win.set_identify(btn.is_active())
         ));
+        if !crate::layer_shell_available() {
+            // The badge is a window anchored to a monitor corner and made
+            // click-through, which is exactly what layer shell is for and
+            // what an ordinary toplevel cannot be asked to do.
+            ident_btn.set_sensitive(false);
+            ident_btn.set_tooltip_text(Some(
+                "Identify needs wlr-layer-shell, which this compositor does not support",
+            ));
+        }
 
         let hide_btn = gtk::Button::builder()
             .child(&innerr("view-conceal-symbolic", "Hide ALL", "Hide all overlays"))
@@ -515,6 +598,55 @@ impl MainWindow {
         action_bar.append(&show_btn);
         action_bar.append(&hide_btn);
         action_bar.append(&ident_btn);
+
+        // ── Cycle mode ────────────────────────────────────────────────
+        // A dead-pixel check means looking at red, then green, then blue,
+        // then white, then black, and a stuck subpixel only shows up on one
+        // of them. Doing that by hand means looking away from the screen to
+        // click every time; the timer keeps both eyes on the panel.
+        let cycle_btn = gtk::ToggleButton::builder()
+            .css_classes(["action-tile"])
+            .tooltip_text("Step through the preset colors on a timer")
+            .child(&innerr("media-playlist-repeat-symbolic", "Cycle", "Step through colors"))
+            .build();
+
+        let cycle_secs = self
+            .imp()
+            .settings
+            .cycle_interval()
+            // A hand-edited or truncated settings file must not be able to
+            // set a flash rate the UI itself refuses to offer.
+            .filter(|s| (CYCLE_MIN..=CYCLE_MAX).contains(s))
+            .unwrap_or(CYCLE_DEFAULT);
+        self.imp().cycle_secs.set(cycle_secs);
+
+        let cycle_spin = gtk::SpinButton::with_range(CYCLE_MIN, CYCLE_MAX, CYCLE_STEP);
+        cycle_spin.set_digits(1);
+        cycle_spin.set_value(cycle_secs);
+        cycle_spin.set_tooltip_text(Some("Seconds on each color"));
+        cycle_spin.connect_value_changed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |spin| win.set_cycle_interval(spin.value())
+        ));
+
+        cycle_btn.connect_toggled(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |btn| win.set_cycling(btn.is_active())
+        ));
+
+        let cycle_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .halign(gtk::Align::Center)
+            .build();
+        cycle_row.append(&cycle_btn);
+        cycle_row.append(
+            &gtk::Label::builder().label("every").css_classes(["dim-label"]).build(),
+        );
+        cycle_row.append(&cycle_spin);
+        cycle_row.append(
+            &gtk::Label::builder().label("s").css_classes(["dim-label"]).build(),
+        );
 
         // ── Monitor check list ────────────────────────────────────────
         let mon_heading = gtk::Label::builder()
@@ -602,8 +734,6 @@ impl MainWindow {
             .halign(gtk::Align::Center)
             .build();
 
-        let preset_buttons: Rc<RefCell<Vec<(gtk::CheckButton, gdk::RGBA)>>> =
-            Rc::new(RefCell::new(Vec::new()));
         let mut group_root: Option<gtk::CheckButton> = None;
 
         for &Preset { name, rgba } in PRESETS {
@@ -648,23 +778,53 @@ impl MainWindow {
             btn.set_cursor_from_name(Some("pointer"));
             btn.connect_toggled(glib::clone!(
                 #[weak(rename_to = win)] self,
-                move |b| if b.is_active() { win.apply_color(rgba); }
+                move |b| {
+                    if !b.is_active() {
+                        return;
+                    }
+                    win.apply_color(rgba);
+                    win.remember_chip(name);
+                }
             ));
 
-            preset_buttons.borrow_mut().push((btn.clone(), rgba));
+            self.imp().presets.borrow_mut().push(btn.clone());
             preset_row.append(&btn);
         }
 
-        // Custom chip — eyedropper icon; a CheckButton in the preset group.
-        let custom_rgba = Rc::new(Cell::new(gdk::RGBA::WHITE));
+        // Custom chip — a swatch of the custom colour with the eyedropper on
+        // top, in the same group as the presets. It used to be an eyedropper
+        // and nothing else, which made the one chip whose colour is not
+        // implied by its name also the only one that never showed it.
+        self.imp()
+            .custom_rgba
+            .set(self.imp().settings.custom_color().unwrap_or(DEFAULT_CUSTOM));
 
-        let custom_icon = gtk::Image::builder()
-            .icon_name("color-select-symbolic")
-            .pixel_size(22)
-            .css_classes(["custom-swatch-icon"])
-            .halign(gtk::Align::Center)
+        let custom_swatch = gtk::DrawingArea::builder()
+            .width_request(64).height_request(40)
             .build();
-        custom_icon.set_size_request(64, 40);
+        custom_swatch.set_draw_func(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |_, cr, w, h| {
+                let rgba = win.imp().custom_rgba.get();
+                rounded_rect(cr, 0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0, 12.0);
+                cr.set_source_rgba(rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, 1.0);
+                let _ = cr.fill_preserve();
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
+                cr.set_line_width(1.0);
+                let _ = cr.stroke();
+            }
+        ));
+
+        let custom_badge = gtk::Image::builder()
+            .icon_name("color-select-symbolic")
+            .pixel_size(16)
+            .css_classes(["custom-swatch-badge"])
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build();
+
+        let custom_stack = gtk::Overlay::builder().child(&custom_swatch).build();
+        custom_stack.add_overlay(&custom_badge);
 
         let custom_inner = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -672,7 +832,7 @@ impl MainWindow {
             .margin_top(6).margin_bottom(6)
             .margin_start(8).margin_end(8)
             .build();
-        custom_inner.append(&custom_icon);
+        custom_inner.append(&custom_stack);
         custom_inner.append(
             &gtk::Label::builder()
                 .label("Custom")
@@ -697,12 +857,17 @@ impl MainWindow {
             .modal(true)
             .build();
 
+        self.imp().custom_btn.replace(Some(custom_btn.clone()));
+
         // Selecting the chip only re-applies the stored custom colour.
         custom_btn.connect_toggled(glib::clone!(
             #[weak(rename_to = win)] self,
-            #[strong] custom_rgba,
             move |btn| {
-                if btn.is_active() { win.apply_color(custom_rgba.get()); }
+                if !btn.is_active() {
+                    return;
+                }
+                win.apply_color(win.imp().custom_rgba.get());
+                win.remember_chip(CUSTOM_CHIP);
             }
         ));
 
@@ -715,25 +880,30 @@ impl MainWindow {
         custom_click.connect_released(glib::clone!(
             #[weak(rename_to = win)] self,
             #[weak] custom_btn,
+            #[weak] custom_swatch,
             #[strong] custom_dialog,
-            #[strong] custom_rgba,
             move |_, _, _, _| {
                 custom_btn.set_active(true);
                 custom_dialog.choose_rgba(
                     Some(&win),
-                    Some(&custom_rgba.get()),
+                    Some(&win.imp().custom_rgba.get()),
                     gio::Cancellable::NONE,
                     glib::clone!(
                         #[weak] win,
-                        #[strong] custom_rgba,
+                        #[weak] custom_swatch,
                         move |res| {
                             // Err = the user cancelled; keep the previous
                             // custom colour rather than leaving the chip
                             // selected but showing something stale.
-                            if let Ok(rgba) = res {
-                                custom_rgba.set(rgba);
-                                win.apply_color(rgba);
-                            }
+                            let Ok(rgba) = res else { return };
+                            win.imp().custom_rgba.set(rgba);
+                            custom_swatch.queue_draw();
+                            win.apply_color(rgba);
+                            // The chip itself was recorded by the
+                            // set_active() above; only the colour is new.
+                            let settings = &win.imp().settings;
+                            settings.set_custom_color(rgba);
+                            settings.save();
                         }
                     ),
                 );
@@ -742,12 +912,36 @@ impl MainWindow {
         custom_btn.add_controller(custom_click);
         preset_row.append(&custom_btn);
 
-        // Activate the first preset at startup. This used to search for
-        // BLACK despite the comment and despite WHITE being PRESETS[0],
-        // so the app called "White Screen" opened on black.
-        if let Some((btn, rgba)) = preset_buttons.borrow().first() {
-            btn.set_active(true);
-            self.apply_color(*rgba);
+        // Restore the chip from the last session, falling back to the first
+        // preset. (That fallback used to search for BLACK despite the comment
+        // and despite WHITE being PRESETS[0], so the app called "White Screen"
+        // opened on black.)
+        //
+        // Activating the chip is enough to apply its colour: every chip's
+        // `toggled` handler calls apply_color().
+        let saved_chip = self.imp().settings.chip();
+        let restored = match saved_chip.as_deref() {
+            Some(CUSTOM_CHIP) => {
+                custom_btn.set_active(true);
+                true
+            }
+            Some(name) => {
+                match PRESETS.iter().position(|p| p.name == name) {
+                    Some(i) => {
+                        self.imp().presets.borrow()[i].set_active(true);
+                        true
+                    }
+                    // A chip that no longer exists, e.g. a settings file
+                    // written by a version with a different preset list.
+                    None => false,
+                }
+            }
+            None => false,
+        };
+        if !restored {
+            if let Some(btn) = self.imp().presets.borrow().first() {
+                btn.set_active(true);
+            }
         }
 
         // ── Gamma status indicator (feature-gated) ────────────────────
@@ -815,6 +1009,7 @@ impl MainWindow {
         controls_card.append(&preset_row);
         controls_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         controls_card.append(&action_bar);
+        controls_card.append(&cycle_row);
 
         // ── Content layout (right pane) ───────────────────────────────
         let main_box = gtk::Box::builder()
@@ -857,6 +1052,17 @@ impl MainWindow {
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
+        // Say so rather than leaving the user to discover it: the overlays
+        // still work here, but they no longer sit above everything else and
+        // Identify is switched off.
+        if !crate::layer_shell_available() {
+            toolbar_view.add_top_bar(
+                &adw::Banner::builder()
+                    .title("No wlr-layer-shell: overlays are fullscreen windows, and Identify is unavailable")
+                    .revealed(true)
+                    .build(),
+            );
+        }
         toolbar_view.set_content(Some(&split_view));
         toolbar_view.add_bottom_bar(&statusbar);
 
@@ -869,6 +1075,13 @@ impl MainWindow {
             #[weak(rename_to = win)] self,
             move |_, _, _, _| win.schedule_sync()
         ));
+
+        // Restore the monitor selection before the first reconcile, so the
+        // rows are built already ticked instead of flickering into place.
+        let saved_monitors = self.imp().settings.monitors();
+        if !saved_monitors.is_empty() {
+            self.imp().selected.replace(saved_monitors.into_iter().collect());
+        }
 
         // Initial population.
         self.sync_monitors();
@@ -906,6 +1119,14 @@ impl MainWindow {
                     l.set_visible(false);
                 }
 
+                // Stop the cycle timer and hand back the idle inhibitor
+                // explicitly. Both would go with the process, but the
+                // inhibitor is state held on the other side of a socket, and
+                // giving it back is cheaper than trusting every session
+                // manager to notice a client that vanished still holding one.
+                win.stop_cycle_timer();
+                win.release_idle();
+
                 // Stop the gamma prober thread deterministically rather
                 // than leaving it to process exit.
                 #[cfg(feature = "gamma")]
@@ -917,6 +1138,7 @@ impl MainWindow {
                 glib::Propagation::Proceed
             }
         ));
+    
     }
 
     // ── Colour ───────────────────────────────────────────────────────────
@@ -934,6 +1156,32 @@ impl MainWindow {
         for ov in self.overlays() {
             ov.set_color(rgba);
         }
+    }
+
+    /// Record which colour chip is selected, for the next launch.
+    ///
+    /// Does nothing while cycling: the timer drives the same chips the user
+    /// clicks, so recording every step would overwrite the chip that was
+    /// actually chosen -- and rewrite the file once per tick.
+    fn remember_chip(&self, name: &str) {
+        let imp = self.imp();
+        if imp.cycling.get() {
+            return;
+        }
+        imp.settings.set_chip(name);
+        imp.settings.save();
+    }
+
+    /// Persist the ticked monitors.
+    ///
+    /// Sorted because the selection is a `HashSet`: without it the file would
+    /// come out in a different order on every save, for no change at all.
+    fn save_monitor_selection(&self) {
+        let imp = self.imp();
+        let mut keys: Vec<String> = imp.selected.borrow().iter().cloned().collect();
+        keys.sort();
+        imp.settings.set_monitors(&keys);
+        imp.settings.save();
     }
 
     // Snapshot helpers. Every method below calls into GTK while walking the
@@ -981,12 +1229,75 @@ impl MainWindow {
         if imp.identify.get() {
             self.present_labels();
         }
+
+        // Keep the screen awake for as long as the colour is up: a lighting
+        // or camera setup is a screen nobody touches for minutes, which is
+        // exactly what the compositor blanks. Run once now and once more from
+        // the main loop, because an overlay presented for the first time may
+        // not have its surface yet and the Wayland inhibitor needs one.
+        // engage() is idempotent, so the second call usually does nothing.
+        self.engage_idle();
+        glib::idle_add_local_once(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move || win.engage_idle()
+        ));
+    }
+
+    /// (Re-)arm idle inhibition against an overlay that is currently up.
+    ///
+    /// On Wayland GTK implements this with `zwp_idle_inhibit_manager_v1` on
+    /// the surface of the window it is given, and falls back to a session
+    /// manager or the inhibit portal elsewhere -- so naming an overlay covers
+    /// wlroots compositors (which run no session manager) and GNOME/X11 alike.
+    ///
+    /// Idempotent, so it is safe to call after every hot-plug reconcile: the
+    /// inhibitor only moves when the overlay holding it has gone.
+    fn engage_idle(&self) {
+        let imp = self.imp();
+        let Some(app) = self.application() else { return };
+
+        // An unrealized overlay has no surface for the compositor to track.
+        // show_selected() queues a second attempt for exactly this case.
+        let overlay = imp
+            .entries
+            .borrow()
+            .iter()
+            .find(|e| e.overlay.is_visible() && e.overlay.is_realized())
+            .map(|e| e.overlay.clone());
+        let Some(overlay) = overlay else { return };
+
+        let unchanged = { imp.idle_window.borrow().as_ref() == Some(&overlay) };
+        if unchanged && imp.idle_cookie.get() != 0 {
+            return;
+        }
+
+        self.release_idle();
+        let cookie = app.inhibit(
+            Some(&overlay),
+            gtk::ApplicationInhibitFlags::IDLE,
+            Some(IDLE_REASON),
+        );
+        imp.idle_cookie.set(cookie);
+        imp.idle_window.replace(Some(overlay));
+    }
+
+    /// Let the screen blank again. Safe to call when nothing is inhibited.
+    fn release_idle(&self) {
+        let imp = self.imp();
+        imp.idle_window.replace(None);
+        let cookie = imp.idle_cookie.replace(0);
+        if cookie != 0 {
+            if let Some(app) = self.application() {
+                app.uninhibit(cookie);
+            }
+        }
     }
 
     /// Hide every overlay. Bound to the app-scoped `hide-overlays` action,
     /// so one ESC press on any screen clears all of them.
     pub fn hide_all_overlays(&self) {
         self.imp().overlays_shown.set(false);
+        self.release_idle();
         for ov in self.overlays() {
             ov.hide_overlay();
         }
@@ -1006,7 +1317,94 @@ impl MainWindow {
 
     fn present_labels(&self) {
         for l in self.labels() {
-            l.present();
+            l.present_badge();
+        }
+    }
+
+    // ── Cycle mode ───────────────────────────────────────────────────────
+
+    /// Start or stop stepping through the presets on a timer.
+    pub fn set_cycling(&self, on: bool) {
+        let imp = self.imp();
+        if imp.cycling.get() == on {
+            return;
+        }
+
+        if !on {
+            // Clear the flag first so restoring the chip is recorded as the
+            // user's choice rather than swallowed by remember_chip().
+            imp.cycling.set(false);
+            self.stop_cycle_timer();
+            if let Some(btn) = imp.pre_cycle.replace(None) {
+                btn.set_active(true);
+            }
+            return;
+        }
+
+        let presets = imp.presets.borrow().clone();
+        if presets.is_empty() {
+            return;
+        }
+        // Come back to whatever is showing now when the mode is switched off,
+        // and start stepping from there so the first tick is a visible change.
+        let active = presets.iter().position(|b| b.is_active());
+        let pre = match active {
+            Some(i) => Some(presets[i].clone()),
+            None    => imp.custom_btn.borrow().clone().filter(|b| b.is_active()),
+        };
+        imp.pre_cycle.replace(pre);
+        imp.cycle_index.set(active.unwrap_or(0));
+        imp.cycling.set(true);
+        self.start_cycle_timer();
+    }
+
+    fn start_cycle_timer(&self) {
+        self.stop_cycle_timer();
+        let id = glib::timeout_add_local(
+            std::time::Duration::from_secs_f64(self.imp().cycle_secs.get()),
+            glib::clone!(
+                #[weak(rename_to = win)] self,
+                #[upgrade_or] glib::ControlFlow::Break,
+                move || {
+                    win.cycle_step();
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
+        self.imp().cycle_source.replace(Some(id));
+    }
+
+    /// Remove the cycle timer if one is running. Safe to call when none is.
+    pub fn stop_cycle_timer(&self) {
+        if let Some(id) = self.imp().cycle_source.replace(None) {
+            id.remove();
+        }
+    }
+
+    fn cycle_step(&self) {
+        let presets = self.imp().presets.borrow().clone();
+        if presets.is_empty() {
+            return;
+        }
+        let next = (self.imp().cycle_index.get() + 1) % presets.len();
+        self.imp().cycle_index.set(next);
+        // Activating the chip rather than calling apply_color() directly
+        // keeps the window showing which colour is currently on the screens.
+        presets[next].set_active(true);
+    }
+
+    /// Change the seconds per step, restarting a running timer so the new
+    /// interval takes effect immediately rather than after the current step.
+    fn set_cycle_interval(&self, secs: f64) {
+        let imp = self.imp();
+        if imp.cycle_secs.get() == secs {
+            return;
+        }
+        imp.cycle_secs.set(secs);
+        imp.settings.set_cycle_interval(secs);
+        imp.settings.save();
+        if imp.cycling.get() {
+            self.start_cycle_timer();
         }
     }
 
@@ -1141,6 +1539,7 @@ impl MainWindow {
         graveyard.extend(old);
         self.imp().graveyard.replace(graveyard);
 
+        let rekeyed_any = !rekeyed.is_empty();
         {
             let mut sel = self.imp().selected.borrow_mut();
             for (from, to) in rekeyed {
@@ -1153,7 +1552,13 @@ impl MainWindow {
             // Only a genuinely empty selection (first run, or the display
             // was empty at startup) picks a monitor on its own -- past that
             // point, "nothing selected" is the user's decision to keep.
-            if sel.is_empty() {
+            //
+            // The restored selection gets one extra chance: a settings file
+            // carried to a machine with different monitors names nothing that
+            // is plugged in, and leaving every row unticked on startup would
+            // look like the app had failed to find the screens.
+            let none_attached = !next.iter().any(|e| sel.contains(&e.key));
+            if sel.is_empty() || (self.imp().first_sync.get() && none_attached) {
                 if let Some(first) = next.first() {
                     sel.insert(first.key.clone());
                 }
@@ -1161,6 +1566,14 @@ impl MainWindow {
         }
 
         self.imp().entries.replace(next);
+        self.imp().first_sync.set(false);
+
+        // A key that changed shape (a connector name reported late, or a
+        // duplicate suffix shifting when its twin was unplugged) has to reach
+        // the settings file too, or the next launch restores the old one.
+        if rekeyed_any {
+            self.save_monitor_selection();
+        }
 
         // A monitor that arrives while the overlays are up gets covered
         // too, and one that comes back goes under the colour it left under.
@@ -1298,6 +1711,7 @@ impl MainWindow {
                     let mut sel = win.imp().selected.borrow_mut();
                     if btn.is_active() { sel.insert(key.clone()); } else { sel.remove(&key); }
                 }
+                win.save_monitor_selection();
                 win.update_show_sensitivity();
             }
         ));

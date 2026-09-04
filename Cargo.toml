@@ -34,7 +34,15 @@ adw             = { version = "0.9.1",  package = "libadwaita", features = ["v1_
 async-channel   = "2.5.0"
 
 # ── `gamma` feature only ──────────────────────────────────────────────────────
-wayland-client        = { version = "0.31.14", optional = true }
+#
+# `dlopen` is not an optimisation. gtk4-layer-shell works by interposing on
+# libwayland-client's symbols, which only takes effect if it is loaded before
+# libwayland-client -- and linking wayland-client directly puts
+# libwayland-client first in DT_NEEDED, silently turning layer-shell support
+# off. (Today the order happens to come out right, but nothing guarantees the
+# order cargo emits link flags in.) Loading libwayland at runtime removes the
+# entry, and the question with it.
+wayland-client        = { version = "0.31.14", features = ["dlopen"], optional = true }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"], optional = true }
 
 [features]

@@ -15,15 +15,24 @@ things an ordinary maximized window can't give you.
 
 ## Requirements
 
-White Screen is a Wayland application. It needs a compositor implementing
-**`wlr-layer-shell`**:
+White Screen is built around **`wlr-layer-shell`**, which is what lets an
+overlay sit above everything else without a window manager getting in the way.
+Where that protocol is missing the app still runs, using ordinary fullscreen
+windows instead, and says so in a banner:
 
-| Compositor | Supported |
-| ---------- | --------- |
-| Niri, Sway, Hyprland, Wayfire, river | yes |
-| KDE Plasma 6 | yes |
-| GNOME / Mutter | **no** — Mutter does not implement `wlr-layer-shell` |
-| X11 | **no** |
+| Compositor | Overlays | Notes |
+| ---------- | -------- | ----- |
+| Niri, Sway, Hyprland, Wayfire, river | layer-shell | full support |
+| KDE Plasma 6 | layer-shell | full support |
+| GNOME / Mutter | fullscreen windows | Mutter does not implement `wlr-layer-shell` |
+| X11 | fullscreen windows | |
+
+In fallback mode the color still fills each selected screen, but the overlay is
+only above the windows it covers — a notification or an on-screen keyboard can
+appear over it — and **Identify** is unavailable, because a badge cannot be
+anchored to one monitor's corner without layer-shell. Each overlay is a
+separate window there, so only the focused one hears <kbd>Esc</kbd>; clicking
+an overlay dismisses them all.
 
 Build-time dependencies:
 
@@ -130,14 +139,44 @@ cargo build --release
 3. Press **Show on selected**.
 4. Press <kbd>Esc</kbd> on an overlay to dismiss it, or **Hide ALL**.
 
+**Custom** shows the color it will apply, and starts on cyan. Clicking it
+reopens the picker; selecting it again just re-applies what you last chose.
+
 **Identify** flashes each monitor's connector name (`DP-1`, `HDMI-A-2`, …) on the
 screen itself, so you always know which physical panel you're looking at.
+
+**Cycle** steps through white, black, red, green and blue on a timer, from 0.5
+to 60 seconds per color. A stuck subpixel only shows up on some of them, so a
+dead-pixel check means seeing all five — this does the clicking for you while
+you watch the panel. (The floor is 0.5 s on purpose: a full-screen color
+flashing faster than that approaches the rate photosensitive-epilepsy guidance
+warns about.)
+
+While an overlay is up the session is kept awake, so a screen used as a key
+light or left on a test pattern does not blank halfway through. Both routes are
+best-effort — `zwp_idle_inhibit_manager_v1` where the compositor has it, and a
+session manager or the inhibit portal otherwise.
+
+### Settings
+
+The selected color, the custom color, the ticked monitors and the cycle
+interval are remembered in:
+
+```
+~/.config/whitescreen/settings.ini
+```
+
+It is a plain key file: edit it or delete it, and anything missing falls back
+to the defaults. A monitor is remembered by connector name (or by its EDID
+strings, for a panel that reports none), so the selection survives unplugging
+and replugging a screen and follows a monitor that has moved to another port.
 
 ## Troubleshooting
 
 | Variable | Effect |
 | -------- | ------ |
-| `LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so` | Last-resort workaround if the app reports *"Compositor not supported"* on a compositor that does support `wlr-layer-shell` (niri, Sway, Hyprland, KDE). gtk4-layer-shell interposes on `libwayland-client` and has to be loaded first. This binary links it directly, so the normal load order already satisfies that — needing this points at an unusual loader setup. Adjust the path to wherever your distribution installs the library. |
+| `LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so` | Last-resort workaround if the app falls back to fullscreen windows on a compositor that does support `wlr-layer-shell` (niri, Sway, Hyprland, KDE). gtk4-layer-shell interposes on `libwayland-client` and has to be loaded first. This binary links it directly, so the normal load order already satisfies that — needing this points at an unusual loader setup. Adjust the path to wherever your distribution installs the library. |
+| `WHITESCREEN_NO_LAYER_SHELL=1` | Force fallback mode (fullscreen windows, no Identify) on a compositor that does support `wlr-layer-shell`. This is how the fallback path is tested without a GNOME or X11 session. |
 | `WHITESCREEN_NO_GAMMA=1` | Do not start the gamma-control monitor. The indicator stays at "inactive". Use this to rule the background Wayland prober in or out when diagnosing a crash or hang. |
 
 Under Flatpak:

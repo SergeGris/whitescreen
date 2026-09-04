@@ -33,6 +33,13 @@
       dismiss it. The Identify button labels every screen with its connector name
       so you always know which physical panel you are looking at.
     </p>
+    <p>
+      Cycle mode steps through white, black, red, green and blue on a timer, which
+      is what a dead-pixel check needs — a stuck subpixel only shows up on some of
+      them. The screen is kept awake while an overlay is up, so a display used as a
+      key light does not blank partway through, and the color, the monitors and the
+      interval are remembered for next time.
+    </p>
   </description>
 
   <launchable type="desktop-id">io.github.SergeGris.WhiteScreen.desktop</launchable>
