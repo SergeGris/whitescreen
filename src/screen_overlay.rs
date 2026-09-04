@@ -187,12 +187,31 @@ mod imp {
         pub fn show_on_monitor(&self, monitor: Option<&gdk::Monitor>) {
             // Reset motion baseline so the notice re-arms on first move.
             self.imp().last_pointer_pos.borrow_mut().take();
-            self.set_monitor(monitor);
+            // Only touch the layer-shell monitor when it actually changes.
+            // gtk_layer_set_monitor() re-creates the surface of a mapped
+            // window, and sync_monitors() re-shows every already-visible
+            // overlay after each hot-plug -- unconditionally setting it would
+            // make every screen flicker whenever any monitor is plugged in.
+            if self.monitor().as_ref() != monitor {
+                self.set_monitor(monitor);
+            }
             self.present();
             if self.is_realized() {
                 self.grab_focus();
             }
             self.imp().arm_notice();
+        }
+
+        /// Detach from the monitor this window was bound to.
+        ///
+        /// Called when that monitor is unplugged. The window outlives the
+        /// GdkMonitor here (see MainWindow::graveyard), and gtk_layer_set_monitor()
+        /// keeps hold of what it was given, so an unplug would otherwise leave the
+        /// window pointing at a monitor that is on its way out -- read again by the
+        /// next map or by MonitorLabel::rebind(). None is the layer-shell default:
+        /// "let the compositor choose".
+        pub fn unbind_monitor(&self) {
+            self.set_monitor(None);
         }
 
         /// Dismiss the overlay and restore the default cursor.

@@ -1,5 +1,5 @@
 
-use std::{cell::Cell, cell::RefCell, collections::HashSet, rc::Rc};
+use std::{cell::Cell, cell::RefCell, collections::{HashMap, HashSet}, rc::Rc};
 
 use adw::{prelude::*, subclass::prelude::*};
 use gtk::{gdk, gio, glib};
@@ -116,24 +116,52 @@ use crate::monitor_label;
 /// and then indexed into the other's list positionally.
 pub struct MonitorEntry {
     pub monitor: gdk::Monitor,
+    /// See `monitor_keys()`. Stored rather than recomputed so that every
+    /// consumer agrees on the identity, duplicate suffix included.
+    pub key:     String,
     pub overlay: ScreenOverlay,
     pub label:   monitor_label::MonitorLabel,
+    /// Change handlers on `monitor`, disconnected when the entry is retired.
+    /// The entry outlives the monitor's presence (see `MainWindow::graveyard`),
+    /// so leaving them connected would keep firing for a screen that is gone.
+    pub handlers: Vec<glib::SignalHandlerId>,
 }
 
-/// Identity used to remember which monitors the user selected across an
-/// unplug/replug cycle. Connector names ("DP-1") are stable when the compositor
-/// reports them; otherwise fall back to the EDID strings plus geometry.
-fn monitor_key(mon: &gdk::Monitor) -> String {
+/// Identity of one monitor, used to remember the user's selection across an
+/// unplug/replug cycle and to match a returning monitor to the windows it had.
+///
+/// Deliberately free of geometry. The previous key mixed in the resolution and
+/// position, so changing the mode or dragging a screen in the display settings
+/// read as "a different monitor": the selection was silently dropped and the
+/// overlay stranded.
+fn monitor_ident(mon: &gdk::Monitor) -> String {
     if let Some(c) = mon.connector().filter(|c| !c.is_empty()) {
         return c.to_string();
     }
-    let geo = mon.geometry();
-    format!(
-        "{}|{}|{}x{}+{}+{}",
-        mon.manufacturer().unwrap_or_default(),
-        mon.model().unwrap_or_default(),
-        geo.width(), geo.height(), geo.x(), geo.y(),
-    )
+    // No connector name reported: fall back to the EDID strings. Two identical
+    // panels then collide, which monitor_keys() resolves.
+    let edid = [mon.manufacturer(), mon.model(), mon.description()]
+        .into_iter()
+        .flatten()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("|");
+    if edid.is_empty() { "monitor".to_string() } else { edid }
+}
+
+/// Keys for a whole monitor list at once, so that indistinguishable monitors
+/// (two of the same model, neither reporting a connector) get "...#2", "...#3"
+/// suffixes instead of sharing one key and being selected as a single unit.
+fn monitor_keys(mons: &[gdk::Monitor]) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    mons.iter()
+        .map(|m| {
+            let base = monitor_ident(m);
+            let n = seen.entry(base.clone()).and_modify(|n| *n += 1).or_insert(1);
+            if *n == 1 { base } else { format!("{base}#{n}") }
+        })
+        .collect()
 }
 
     mod imp {
@@ -142,20 +170,34 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
         pub struct MainWindow {
             /// Current monitors, rebuilt on every hot-plug event.
             pub entries:  RefCell<Vec<MonitorEntry>>,
-            /// Selected monitors, keyed by `monitor_key` so the choice survives
-            /// unplug/replug rather than being tied to a list position.
+            /// Selected monitors, keyed by `monitor_keys()` so the choice
+            /// survives unplug/replug rather than being tied to a list
+            /// position. Keys for absent monitors are kept, not pruned: that
+            /// is what makes a replug restore the selection.
             pub selected: RefCell<HashSet<String>>,
             /// Colour currently applied, so overlays created by a later hot-plug
             /// start out matching the ones already on screen.
             pub color:    Cell<gdk::RGBA>,
             pub identify: Cell<bool>,
 
+            /// True while show_selected() has overlays up, so that a monitor
+            /// plugged in mid-session is covered too instead of staying the
+            /// one conspicuously bright screen in the room.
+            pub overlays_shown: Cell<bool>,
+            /// Set while a sync is queued on the main loop; see schedule_sync().
+            pub sync_queued: Cell<bool>,
+
             // Widgets that outlive build_ui because hot-plug has to update them.
-            /// Windows for monitors that have gone away. They are hidden but
-            /// deliberately never destroyed and never detached from the
-            /// application: both routes go through gtk_application_remove_window(),
-            /// whose handler dereferences a surface these windows may never have
-            /// had. Holding them costs one hidden window per unplug.
+            /// Windows for monitors that are not currently attached. They are
+            /// hidden but deliberately never destroyed and never detached from
+            /// the application: both routes go through
+            /// gtk_application_remove_window(), whose handler dereferences a
+            /// surface these windows may never have had.
+            ///
+            /// Not purely a leak: sync_monitors() takes windows back out of
+            /// here by key, so a dock/undock cycle reuses one pair of windows
+            /// instead of stacking up a new pair every time. Growth is bounded
+            /// by the number of distinct monitors seen in one session.
             pub graveyard: RefCell<Vec<MonitorEntry>>,
 
             pub mon_box:   RefCell<Option<gtk::Box>>,
@@ -174,6 +216,8 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                     selected: RefCell::new(HashSet::new()),
                     color:    Cell::new(gdk::RGBA::WHITE),
                     identify: Cell::new(false),
+                    overlays_shown: Cell::new(false),
+                    sync_queued: Cell::new(false),
                     graveyard: RefCell::new(Vec::new()),
                     mon_box:  RefCell::new(None),
                     show_btn: RefCell::new(None),
@@ -852,7 +896,7 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
             // kept overlays for unplugged monitors and never noticed new ones.
             mon_model.connect_items_changed(glib::clone!(
                 #[weak(rename_to = win)] self,
-                move |_, _, _, _| win.sync_monitors()
+                move |_, _, _, _| win.schedule_sync()
             ));
 
             // Initial population.
@@ -944,10 +988,19 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                 let selected = imp.selected.borrow();
                 entries
                     .iter()
-                    .filter(|e| selected.contains(&monitor_key(&e.monitor)))
+                    .filter(|e| selected.contains(&e.key) && e.monitor.is_valid())
                     .map(|e| (e.overlay.clone(), e.monitor.clone()))
                     .collect()
             };
+
+            // Nothing attached to show on. Leave `overlays_shown` alone: if the
+            // last selected monitor was just unplugged the overlays are still
+            // logically up, and replugging it must bring the colour back.
+            if targets.is_empty() {
+                return;
+            }
+            imp.overlays_shown.set(true);
+
             for (overlay, monitor) in targets {
                 overlay.show_on_monitor(Some(&monitor));
             }
@@ -962,6 +1015,7 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
         /// Hide every overlay. Bound to the app-scoped `hide-overlays` action,
         /// so one ESC press on any screen clears all of them.
         pub fn hide_all_overlays(&self) {
+            self.imp().overlays_shown.set(false);
             for ov in self.overlays() {
                 ov.hide_overlay();
             }
@@ -987,9 +1041,53 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
 
         // ── Monitor tracking ─────────────────────────────────────────────────
 
+        /// Queue a `sync_monitors()` for the next main-loop iteration.
+        ///
+        /// One physical hot-plug is rarely one signal: the display's list model
+        /// typically emits items-changed twice (remove, then add) and a mode
+        /// switch emits a burst of property notifies. Reconciling on each of
+        /// them would rebuild the sidebar several times per event and, worse,
+        /// tear an overlay down and put it straight back up mid-plug.
+        /// Coalescing collapses the burst into one rebuild once the display has
+        /// settled, and keeps the reconcile off GTK's own signal stack.
+        pub fn schedule_sync(&self) {
+            if self.imp().sync_queued.replace(true) {
+                return;
+            }
+            glib::idle_add_local_once(glib::clone!(
+                #[weak(rename_to = win)] self,
+                move || {
+                    win.imp().sync_queued.set(false);
+                    win.sync_monitors();
+                }
+            ));
+        }
+
+        /// Watch one monitor for the changes that never reach the display's
+        /// list model: a mode switch, a rescale, a move in the display
+        /// arrangement, a connector name that only arrives later, or the
+        /// monitor going invalid in place. Without these the sidebar keeps
+        /// reporting whatever the screen looked like when the app started.
+        fn track_monitor(&self, mon: &gdk::Monitor) -> Vec<glib::SignalHandlerId> {
+            vec![
+                mon.connect_invalidate(glib::clone!(
+                    #[weak(rename_to = win)] self,
+                    move |_| win.schedule_sync()
+                )),
+                // One handler for every property rather than six: geometry,
+                // scale, refresh-rate, connector and valid all mean the same
+                // thing here -- re-read this monitor -- and the reconcile is
+                // coalesced and idempotent anyway.
+                mon.connect_notify_local(None, glib::clone!(
+                    #[weak(rename_to = win)] self,
+                    move |_, _| win.schedule_sync()
+                )),
+            ]
+        }
+
         /// Reconcile `entries` with the display's current monitor list, then
-        /// redraw the sidebar. Safe to call repeatedly; it only creates and
-        /// destroys what actually changed.
+        /// redraw the sidebar. Idempotent: repeated calls only touch what
+        /// actually changed, so it is safe to run on every hot-plug signal.
         pub fn sync_monitors(&self) {
             let Some(display) = gdk::Display::default() else { return };
             let Some(app) = self.application().and_downcast::<adw::Application>() else { return };
@@ -999,61 +1097,106 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                 .filter_map(|i| model.item(i)?.downcast::<gdk::Monitor>().ok())
                 .filter(|m| m.is_valid())
                 .collect();
+            let keys = monitor_keys(&current);
 
             let color = self.imp().color.get();
-            let mut old = self.imp().entries.take();
+            let mut old       = self.imp().entries.take();
+            let mut graveyard = self.imp().graveyard.take();
             let mut next: Vec<MonitorEntry> = Vec::with_capacity(current.len());
+            let mut rekeyed: Vec<(String, String)> = Vec::new();
 
-            for (i, mon) in current.iter().enumerate() {
-                match old.iter().position(|e| e.monitor == *mon) {
-                    // Known monitor: keep its windows, so an overlay that is
-                    // already on screen is not torn down by an unrelated plug.
-                    Some(pos) => next.push(old.remove(pos)),
-                    None => {
-                        let overlay = ScreenOverlay::new(&app);
-                        overlay.set_color(color);
+            for (i, (mon, key)) in current.iter().zip(keys.iter()).enumerate() {
+                let title = monitor_title(mon, i);
+                let sub   = monitor_subtitle(mon);
+                let sub   = (!sub.is_empty()).then_some(sub);
 
-                        let title = monitor_title(mon, i);
-                        let sub   = monitor_subtitle(mon);
-                        let label = monitor_label::MonitorLabel::new(
-                            &app, mon, &title,
-                            if sub.is_empty() { None } else { Some(sub.as_str()) },
-                        );
-
-                        next.push(MonitorEntry {
-                            monitor: mon.clone(),
-                            overlay,
-                            label,
-                        });
+                // Same GdkMonitor object, so this screen never went away: keep
+                // its windows. An overlay already on screen must not blink
+                // because some unrelated monitor was plugged in.
+                if let Some(pos) = old.iter().position(|e| e.monitor == *mon) {
+                    let mut e = old.remove(pos);
+                    if e.key != *key {
+                        // A connector name can show up late, and a duplicate
+                        // suffix shifts when a twin is unplugged. Carry the
+                        // selection across instead of dropping it.
+                        let was = std::mem::replace(&mut e.key, key.clone());
+                        rekeyed.push((was, key.clone()));
                     }
+                    // The fallback title is positional ("Monitor 2"), so an
+                    // unplug ahead of this one renames it.
+                    e.label.set_info(&title, sub.as_deref());
+                    next.push(e);
+                    continue;
                 }
+
+                // A monitor seen earlier in this session: take its windows back
+                // out of the graveyard. This is what stops a dock/undock cycle
+                // from stacking up a new window pair every time round.
+                if let Some(pos) = graveyard.iter().position(|e| e.key == *key) {
+                    let mut e = graveyard.remove(pos);
+                    e.monitor  = mon.clone();
+                    e.handlers = self.track_monitor(mon);
+                    e.overlay.set_color(color);
+                    e.label.rebind(mon, &title, sub.as_deref());
+                    next.push(e);
+                    continue;
+                }
+
+                let overlay = ScreenOverlay::new(&app);
+                overlay.set_color(color);
+                let label = monitor_label::MonitorLabel::new(&app, mon, &title, sub.as_deref());
+
+                next.push(MonitorEntry {
+                    monitor:  mon.clone(),
+                    key:      key.clone(),
+                    overlay,
+                    label,
+                    handlers: self.track_monitor(mon),
+                });
             }
 
-            // Whatever is left in `old` was unplugged. Hide it and retire it;
-            // see MainWindow::graveyard for why it is not destroyed.
-            for e in &old {
+            // Whatever is left in `old` was unplugged. Hide it and set it
+            // aside; see MainWindow::graveyard for why it is not destroyed and
+            // why keeping it is not simply a leak.
+            for e in &mut old {
+                for id in e.handlers.drain(..) {
+                    e.monitor.disconnect(id);
+                }
                 e.overlay.hide_overlay();
                 e.label.set_visible(false);
+                e.overlay.unbind_monitor();
+                e.label.unbind_monitor();
             }
-            self.imp().graveyard.borrow_mut().extend(old);
+            graveyard.extend(old);
+            self.imp().graveyard.replace(graveyard);
 
-            // Drop selections for monitors that no longer exist, and select the
-            // first monitor when nothing is selected (including first run).
             {
-                let live: HashSet<String> = next.iter().map(|e| monitor_key(&e.monitor)).collect();
                 let mut sel = self.imp().selected.borrow_mut();
-                sel.retain(|k| live.contains(k));
+                for (from, to) in rekeyed {
+                    if sel.remove(&from) {
+                        sel.insert(to);
+                    }
+                }
+                // Selections for absent monitors are kept on purpose: unplug a
+                // screen and plug it back in and the choice is still there.
+                // Only a genuinely empty selection (first run, or the display
+                // was empty at startup) picks a monitor on its own -- past that
+                // point, "nothing selected" is the user's decision to keep.
                 if sel.is_empty() {
                     if let Some(first) = next.first() {
-                        sel.insert(monitor_key(&first.monitor));
+                        sel.insert(first.key.clone());
                     }
                 }
             }
 
             self.imp().entries.replace(next);
 
-            // Newly arrived badges must respect the current Identify state.
-            if self.imp().identify.get() {
+            // A monitor that arrives while the overlays are up gets covered
+            // too, and one that comes back goes under the colour it left under.
+            if self.imp().overlays_shown.get() {
+                self.show_selected();
+            } else if self.imp().identify.get() {
+                // Badges for newly arrived monitors must respect Identify.
                 self.present_labels();
             }
 
@@ -1076,8 +1219,8 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
 
             // Snapshot for the same re-entrancy reason as above; the row only
             // ever needs the monitor.
-            let monitors: Vec<gdk::Monitor> =
-                imp.entries.borrow().iter().map(|e| e.monitor.clone()).collect();
+            let monitors: Vec<(String, gdk::Monitor)> =
+                imp.entries.borrow().iter().map(|e| (e.key.clone(), e.monitor.clone())).collect();
 
             if monitors.is_empty() {
                 // Zero monitors is a transient state during a hot-plug, not a
@@ -1092,16 +1235,16 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
                 );
             }
 
-            for (i, mon) in monitors.iter().enumerate() {
-                rows_box.append(&self.build_monitor_row(i, mon));
+            for (i, (key, mon)) in monitors.iter().enumerate() {
+                rows_box.append(&self.build_monitor_row(i, key, mon));
             }
 
             self.update_show_sensitivity();
         }
 
-        fn build_monitor_row(&self, i: usize, mon: &gdk::Monitor) -> gtk::CheckButton {
+        fn build_monitor_row(&self, i: usize, key: &str, mon: &gdk::Monitor) -> gtk::CheckButton {
             let geo = mon.geometry();
-            let key = monitor_key(mon);
+            let key = key.to_string();
 
             let icon = gtk::Image::builder()
                 .icon_name("video-display-symbolic")
@@ -1193,7 +1336,13 @@ fn monitor_key(mon: &gdk::Monitor) -> String {
 
         fn update_show_sensitivity(&self) {
             let imp = self.imp();
-            let any = !imp.selected.borrow().is_empty() && !imp.entries.borrow().is_empty();
+            // Intersect, do not just count: selections for unplugged monitors
+            // are kept deliberately, and "Show" must not look clickable when
+            // none of the selected screens is currently attached.
+            let any = {
+                let sel = imp.selected.borrow();
+                imp.entries.borrow().iter().any(|e| sel.contains(&e.key))
+            };
             if let Some(btn) = imp.show_btn.borrow().as_ref() {
                 btn.set_sensitive(any);
             }

@@ -139,12 +139,53 @@ impl MonitorLabel {
     ) -> Self {
         let obj: Self = glib::Object::builder().property("application", app).build();
         obj.set_monitor(Some(monitor));
-        let imp = obj.imp();
-        imp.title_lbl.set_text(title);
-        if let Some(s) = subtitle {
-            imp.subtitle_lbl.set_text(s);
-            imp.subtitle_lbl.set_visible(true);
-        }
+        obj.set_info(title, subtitle);
         obj
+    }
+
+    /// Update the badge text in place.
+    ///
+    /// Needed because the text is not fixed for the life of the window: the
+    /// fallback title is positional ("Monitor 2", so unplugging a screen ahead
+    /// of this one renames it), and a compositor may only report the connector
+    /// name and EDID strings after the badge has already been built.
+    pub fn set_info(&self, title: &str, subtitle: Option<&str>) {
+        let imp = self.imp();
+        imp.title_lbl.set_text(title);
+        match subtitle {
+            Some(s) => {
+                imp.subtitle_lbl.set_text(s);
+                imp.subtitle_lbl.set_visible(true);
+            }
+            None => {
+                imp.subtitle_lbl.set_text("");
+                imp.subtitle_lbl.set_visible(false);
+            }
+        }
+    }
+
+    /// Detach from the monitor this window was bound to.
+    ///
+    /// Called when that monitor is unplugged. The window outlives the
+    /// GdkMonitor here (see MainWindow::graveyard), and gtk_layer_set_monitor()
+    /// keeps hold of what it was given, so an unplug would otherwise leave the
+    /// window pointing at a monitor that is on its way out -- read again by the
+    /// next map or by MonitorLabel::rebind(). None is the layer-shell default:
+    /// "let the compositor choose".
+    pub fn unbind_monitor(&self) {
+        self.set_monitor(None);
+    }
+
+    /// Point an existing badge at a monitor that has just come back, so a
+    /// dock/undock cycle reuses this window instead of leaking a new one.
+    ///
+    /// The layer-shell monitor is only touched when it actually differs:
+    /// gtk_layer_set_monitor() re-creates the surface of a mapped window, so
+    /// calling it unconditionally would flicker every badge on any hot-plug.
+    pub fn rebind(&self, monitor: &gdk::Monitor, title: &str, subtitle: Option<&str>) {
+        if self.monitor().as_ref() != Some(monitor) {
+            self.set_monitor(Some(monitor));
+        }
+        self.set_info(title, subtitle);
     }
 }
