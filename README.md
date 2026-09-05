@@ -31,7 +31,7 @@ In fallback mode the color still fills each selected screen, but the overlay is
 only above the windows it covers — a notification or an on-screen keyboard can
 appear over it — and **Identify** is unavailable, because a badge cannot be
 anchored to one monitor's corner without layer-shell. Each overlay is a
-separate window there, so only the focused one hears <kbd>Esc</kbd>; clicking
+separate window there, so only the focused one hears the keyboard; clicking
 an overlay dismisses them all.
 
 Build-time dependencies:
@@ -137,7 +137,12 @@ cargo build --release
 1. Tick the monitors you want to cover in the sidebar.
 2. Pick a color — a preset, or **Custom** for the full picker.
 3. Press **Show on selected**.
-4. Press <kbd>Esc</kbd> on an overlay to dismiss it, or **Hide ALL**.
+4. Press any key on an overlay to dismiss every one of them, or **Hide ALL**.
+
+Any key dismisses the overlays, not just <kbd>Esc</kbd> — a full-screen color
+with no other keyboard function should not be something you can get stuck
+behind. Key *combinations* are left alone, so <kbd>Ctrl</kbd>+<kbd>Q</kbd>
+still quits from an overlay.
 
 **Custom** shows the color it will apply, and starts on cyan. Clicking it
 reopens the picker; selecting it again just re-applies what you last chose.

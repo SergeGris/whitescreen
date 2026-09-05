@@ -88,7 +88,7 @@ fn build_status_bar(
     );
     left.append(
         &gtk::Label::builder()
-            .label("Press ESC to exit overlay")
+            .label("Press any key to exit the overlay")
             .css_classes(["dim-label"])
             .build(),
     );
@@ -519,6 +519,30 @@ impl MainWindow {
             ));
             app.add_action(&hide);
         }
+
+        // ESC on this window hides the overlays too.
+        //
+        // On a compositor that honours the layer-shell keyboard grab the
+        // overlay itself gets the key and this never fires. In fallback mode
+        // it is not a grab but ordinary focus, and focus can sit here -- and
+        // then the status bar would be telling the user to press a key that
+        // nothing was listening for.
+        //
+        // Bubble phase, and only while overlays are up, so ESC keeps its
+        // usual meaning for a popover or a dialog on top of this window.
+        let esc = gtk::EventControllerKey::new();
+        esc.connect_key_pressed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            #[upgrade_or] glib::Propagation::Proceed,
+            move |_, key, _, _| {
+                if key == gdk::Key::Escape && win.imp().overlays_shown.get() {
+                    win.hide_all_overlays();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            }
+        ));
+        self.add_controller(esc);
 
         // ── Monitor list ──────────────────────────────────────────────
         // Enumerated once, here. The rows themselves are built by
@@ -1087,58 +1111,73 @@ impl MainWindow {
         self.sync_monitors();
 
         // ── Teardown ──────────────────────────────────────────────────
+        //
+        // Closing the window is only one way out: Ctrl+Q, and anything else
+        // that reaches g_application_quit(), never touches this handler. So
+        // the work lives in shutdown(), hung off the application's own
+        // `shutdown` signal, and this only asks the application to stop.
+        //
+        // Calling it here as well is not belt and braces for its own sake:
+        // returning Proceed destroys this window immediately, so by the time
+        // `shutdown` is emitted the weak reference there no longer upgrades.
+        // shutdown() is idempotent, so running it twice costs nothing.
+        if let Some(app) = self.application() {
+            app.connect_shutdown(glib::clone!(
+                #[weak(rename_to = win)] self,
+                move |_| win.shutdown()
+            ));
+        }
+
         self.connect_close_request(glib::clone!(
             #[weak(rename_to = win)] self,
             #[upgrade_or] glib::Propagation::Proceed,
             move |_| {
-                // Do NOT destroy() the overlays and badges here.
-                //
-                // They are layer-shell windows, and most of them have never
-                // been realized -- one is created per monitor at startup,
-                // but only shown on demand. gtk_window_destroy() on such a
-                // window emits a signal whose handler calls
-                // gdk_surface_get_display() on a surface that does not
-                // exist, giving
-                //   Gdk-CRITICAL gdk_surface_get_display:
-                //   assertion 'GDK_IS_SURFACE (surface)' failed
-                // and then a segfault.
-                //
-                // Hiding them and quitting is also a clearer statement of
-                // intent: the destroy() calls only existed to drop the
-                // application's window count to zero so that closing the
-                // main window ended the program. Saying so directly is
-                // both safer and more obvious.
-                //
-                // NB: no show_on_monitor(None) either -- that call
-                // *presents* the window, so an older version of this
-                // teardown flashed every overlay full-screen on the way out.
-                for ov in win.overlays() {
-                    ov.hide_overlay();
-                }
-                for l in win.labels() {
-                    l.set_visible(false);
-                }
-
-                // Stop the cycle timer and hand back the idle inhibitor
-                // explicitly. Both would go with the process, but the
-                // inhibitor is state held on the other side of a socket, and
-                // giving it back is cheaper than trusting every session
-                // manager to notice a client that vanished still holding one.
-                win.stop_cycle_timer();
-                win.release_idle();
-
-                // Stop the gamma prober thread deterministically rather
-                // than leaving it to process exit.
-                #[cfg(feature = "gamma")]
-                win.imp().gamma_listener.replace(None);
-
+                win.shutdown();
                 if let Some(app) = win.application() {
                     app.quit();
                 }
                 glib::Propagation::Proceed
             }
         ));
-    
+    }
+
+    /// Give everything back before the process ends.
+    ///
+    /// Idempotent, and safe to call from any exit route.
+    ///
+    /// Overlays and badges are hidden, never destroyed. They are layer-shell
+    /// windows and most have never been realized -- one pair is created per
+    /// monitor at startup, but only shown on demand -- and
+    /// gtk_window_destroy() on such a window emits a signal whose handler
+    /// calls gdk_surface_get_display() on a surface that does not exist:
+    ///   Gdk-CRITICAL gdk_surface_get_display:
+    ///   assertion 'GDK_IS_SURFACE (surface)' failed
+    /// followed by a segfault. (Nor show_on_monitor(None): that call
+    /// *presents* the window, so an older version of this flashed every
+    /// overlay full-screen on the way out.)
+    pub fn shutdown(&self) {
+        // The graveyard is included: those windows are already hidden, but
+        // "hide everything" is the invariant this is here to guarantee, and
+        // it should not depend on retirement having gone to plan.
+        for ov in self.all_overlays() {
+            ov.hide_overlay();
+        }
+        for l in self.all_labels() {
+            l.set_visible(false);
+        }
+
+        // Stop the cycle timer and hand back the idle inhibitor explicitly.
+        // Both would go with the process, but the inhibitor is state held on
+        // the other side of a socket, and giving it back is cheaper than
+        // trusting every session manager to notice a client that vanished
+        // still holding one.
+        self.stop_cycle_timer();
+        self.release_idle();
+
+        // Stop the gamma prober thread deterministically rather than leaving
+        // it to process exit.
+        #[cfg(feature = "gamma")]
+        self.imp().gamma_listener.replace(None);
     }
 
     // ── Colour ───────────────────────────────────────────────────────────
@@ -1196,6 +1235,22 @@ impl MainWindow {
         self.imp().entries.borrow().iter().map(|e| e.label.clone()).collect()
     }
 
+    /// Every overlay this window owns, retired ones included. Only teardown
+    /// wants these: everything else acts on the monitors actually attached.
+    fn all_overlays(&self) -> Vec<ScreenOverlay> {
+        let imp = self.imp();
+        let mut all = self.overlays();
+        all.extend(imp.graveyard.borrow().iter().map(|e| e.overlay.clone()));
+        all
+    }
+
+    fn all_labels(&self) -> Vec<monitor_label::MonitorLabel> {
+        let imp = self.imp();
+        let mut all = self.labels();
+        all.extend(imp.graveyard.borrow().iter().map(|e| e.label.clone()));
+        all
+    }
+
     // ── Overlay control ──────────────────────────────────────────────────
 
     /// Fill every selected monitor.
@@ -1215,7 +1270,12 @@ impl MainWindow {
         // Nothing attached to show on. Leave `overlays_shown` alone: if the
         // last selected monitor was just unplugged the overlays are still
         // logically up, and replugging it must bring the colour back.
+        //
+        // The inhibitor cannot stay, though. Nothing is on any screen to
+        // justify it, and on the session-manager route it would otherwise
+        // keep the machine awake until the app quit.
         if targets.is_empty() {
+            self.release_idle();
             return;
         }
         imp.overlays_shown.set(true);
@@ -1264,7 +1324,13 @@ impl MainWindow {
             .iter()
             .find(|e| e.overlay.is_visible() && e.overlay.is_realized())
             .map(|e| e.overlay.clone());
-        let Some(overlay) = overlay else { return };
+        let Some(overlay) = overlay else {
+            // Nothing visible to attach to. Not always transient: the monitor
+            // holding the overlay may have just been unplugged, and an
+            // inhibitor for a window nobody can see has to go.
+            self.release_idle();
+            return;
+        };
 
         let unchanged = { imp.idle_window.borrow().as_ref() == Some(&overlay) };
         if unchanged && imp.idle_cookie.get() != 0 {

@@ -8,6 +8,48 @@ use crate::color_surface;
 
 const NOTICE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Whether this keystroke should take the overlays down.
+///
+/// Deliberately broader than just ESC. The overlay holds an exclusive
+/// keyboard grab, so every key it does not act on is swallowed and lost
+/// anyway -- and between silently eating a keystroke and reading it as "get
+/// me out of here", the second is the safer answer for a full-screen colour
+/// with no other keyboard function. What that must not cost is the ability to
+/// leave deliberately, hence the two exceptions below.
+fn dismisses_overlay(key: gdk::Key, state: gdk::ModifierType) -> bool {
+    if is_modifier_key(key) {
+        return false;
+    }
+    // A key held with Ctrl/Alt/Super is a shortcut, not an escape attempt.
+    // Swallowing those would break the app's own Ctrl+Q -- which is exactly
+    // what happened when this first dismissed on *any* key: quitting from an
+    // overlay silently turned into dismissing the overlay.
+    !state.intersects(
+        gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SUPER_MASK
+            | gdk::ModifierType::META_MASK
+            | gdk::ModifierType::HYPER_MASK,
+    )
+}
+
+/// Keys that only ever modify another key. Reaching for Ctrl or Super is not
+/// an attempt to leave, and must not tear the overlay down before the rest of
+/// the shortcut is even typed.
+fn is_modifier_key(key: gdk::Key) -> bool {
+    matches!(
+        key,
+        gdk::Key::Shift_L | gdk::Key::Shift_R | gdk::Key::Shift_Lock
+            | gdk::Key::Control_L | gdk::Key::Control_R
+            | gdk::Key::Alt_L | gdk::Key::Alt_R
+            | gdk::Key::Meta_L | gdk::Key::Meta_R
+            | gdk::Key::Super_L | gdk::Key::Super_R
+            | gdk::Key::Hyper_L | gdk::Key::Hyper_R
+            | gdk::Key::Caps_Lock | gdk::Key::Num_Lock | gdk::Key::Scroll_Lock
+            | gdk::Key::ISO_Level3_Shift | gdk::Key::ISO_Level5_Shift
+    )
+}
+
 // ── ScreenOverlay – fullscreen layer-shell colour window ──────────────────────
 mod imp {
     use super::*;
@@ -59,11 +101,12 @@ mod imp {
 
             let toast = adw::Toast::builder()
                 .title(if crate::layer_shell_available() {
-                    "Press ESC to exit"
+                    "Press any key to exit"
                 } else {
                     // Fallback overlays are ordinary windows, so only the
-                    // focused one hears ESC; clicking works on any of them.
-                    "Press ESC or click to exit"
+                    // focused one hears the keyboard; clicking works on any
+                    // of them.
+                    "Press any key or click to exit"
                 })
                 .timeout(super::NOTICE_TIMEOUT.as_secs() as u32)
                 .build();
@@ -136,23 +179,20 @@ mod imp {
                 }
             });
 
-            // ── Input: ESC closes every overlay ────────────────────────
-            let esc = gtk::EventControllerKey::new();
-            esc.set_propagation_phase(gtk::PropagationPhase::Capture);
-            esc.connect_key_pressed(glib::clone!(
+            // ── Input: any key closes every overlay ────────────────────
+            let keys = gtk::EventControllerKey::new();
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            keys.connect_key_pressed(glib::clone!(
                 #[weak] win,
                 #[upgrade_or] glib::Propagation::Proceed,
-                move |_, key, _, _| {
-                    if key != gdk::Key::Escape {
-                        // Do NOT swallow everything else. This window holds an
-                        // exclusive keyboard seat, so any key stopped here is
-                        // lost outright — including the compositor's own binds.
+                move |_, key, _, state| {
+                    if !dismisses_overlay(key, state) {
                         return glib::Propagation::Proceed;
                     }
 
                     // Hide *all* overlays, not just this one: with one overlay
                     // per monitor the others would keep grabbing the keyboard
-                    // and the user would have to press ESC once per screen.
+                    // and the user would have to press a key once per screen.
                     match win.application() {
                         Some(app) => app.activate_action("hide-overlays", None),
                         None      => win.hide_overlay(),
@@ -160,7 +200,7 @@ mod imp {
                     glib::Propagation::Stop
                 }
             ));
-            win.add_controller(esc);
+            win.add_controller(keys);
 
             // ── Input: clicks ──────────────────────────────────────────
             let click = gtk::GestureClick::new();
@@ -280,3 +320,43 @@ mod imp {
             self.set_visible(false);
         }
     }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifiers_do_not_dismiss() {
+        for key in [
+            gdk::Key::Shift_L, gdk::Key::Control_R, gdk::Key::Alt_L,
+            gdk::Key::Super_L, gdk::Key::Caps_Lock, gdk::Key::ISO_Level3_Shift,
+        ] {
+            assert!(is_modifier_key(key), "{key:?} should be treated as a modifier");
+        }
+    }
+
+    #[test]
+    fn ordinary_keys_dismiss() {
+        for key in [
+            gdk::Key::Escape, gdk::Key::q, gdk::Key::space, gdk::Key::Return,
+            gdk::Key::a, gdk::Key::F1, gdk::Key::Left,
+        ] {
+            assert!(!is_modifier_key(key), "{key:?} should dismiss the overlay");
+            assert!(dismisses_overlay(key, gdk::ModifierType::empty()));
+        }
+    }
+
+    #[test]
+    fn shortcuts_pass_through() {
+        // Ctrl+Q has to reach the application's quit accelerator.
+        assert!(!dismisses_overlay(gdk::Key::q, gdk::ModifierType::CONTROL_MASK));
+        assert!(!dismisses_overlay(gdk::Key::Tab, gdk::ModifierType::ALT_MASK));
+        assert!(!dismisses_overlay(gdk::Key::l, gdk::ModifierType::SUPER_MASK));
+    }
+
+    #[test]
+    fn shift_still_dismisses() {
+        // Shift+A is an ordinary keystroke, not a shortcut.
+        assert!(dismisses_overlay(gdk::Key::A, gdk::ModifierType::SHIFT_MASK));
+    }
+}
