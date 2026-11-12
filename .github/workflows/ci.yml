@@ -147,8 +147,20 @@ jobs:
       # The templates, not the built files: these are what a contributor
       # edits, and msgfmt only ever adds translated copies of keys that are
       # already valid here. `meson test` checks the merged output as well.
+      #
+      # Each is copied to the name it is installed under first, because
+      # desktop-file-validate refuses to look at anything whose filename
+      # does not end in .desktop -- and because validating a file under the
+      # name it will really have is what the check is for.
       - name: Validate .desktop
-        run: desktop-file-validate data/io.github.SergeGris.WhiteScreen.desktop.in
+        run: |
+          install -D data/io.github.SergeGris.WhiteScreen.desktop.in \
+            "$RUNNER_TEMP/validate/io.github.SergeGris.WhiteScreen.desktop"
+          desktop-file-validate "$RUNNER_TEMP/validate/io.github.SergeGris.WhiteScreen.desktop"
 
       - name: Validate AppStream metainfo
-        run: appstreamcli validate --no-net --explain data/io.github.SergeGris.WhiteScreen.metainfo.xml.in
+        run: |
+          install -D data/io.github.SergeGris.WhiteScreen.metainfo.xml.in \
+            "$RUNNER_TEMP/validate/io.github.SergeGris.WhiteScreen.metainfo.xml"
+          appstreamcli validate --no-net --explain \
+            "$RUNNER_TEMP/validate/io.github.SergeGris.WhiteScreen.metainfo.xml"
