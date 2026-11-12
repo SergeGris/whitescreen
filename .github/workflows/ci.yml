@@ -30,7 +30,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev \
             meson ninja-build libwayland-dev wayland-protocols \
-            libgirepository1.0-dev gobject-introspection valac
+            libgirepository1.0-dev gobject-introspection valac \
+            gettext desktop-file-utils appstream
 
       - name: Build and install gtk4-layer-shell
         run: |
@@ -89,6 +90,48 @@ jobs:
       - name: Test
         run: cargo test --locked ${{ steps.feat.outputs.args }}
 
+      # The install path, which cargo alone never exercises: the translation
+      # catalogues, the desktop entry and the AppStream metadata are built by
+      # Meson, so a break in po/ or data/ would otherwise reach master and
+      # only show up in the Flatpak job.
+      - name: Build and test with Meson
+        run: |
+          meson setup _build --prefix=/usr $MESON_OPTS
+          meson compile -C _build
+          meson test -C _build --print-errorlogs
+        env:
+          MESON_OPTS: ${{ matrix.features == 'gamma' && '-Dgamma=true' || '' }}
+
+  windows:
+    name: Native Windows front end
+    runs-on: windows-latest
+    # The same flags the released build uses, so that anything specific to
+    # the static CRT fails here rather than at release time. Repeating the
+    # flag is not optional: this variable replaces .cargo/config.toml's
+    # rustflags rather than adding to them.
+    env:
+      RUSTFLAGS: -D warnings -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Only the crates that have no GTK in them: the overlay front end and
+      # the shared core. The application itself is the GTK build and is not
+      # expected to compile here.
+      - name: Build
+        run: cargo build --locked -p whitescreen-win -p whitescreen-core
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -p whitescreen-win -p whitescreen-core
+
+      - name: Test
+        run: cargo test --locked -p whitescreen-win -p whitescreen-core
+
   data:
     name: Validate desktop entry and AppStream metadata
     runs-on: ubuntu-24.04
@@ -101,8 +144,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             desktop-file-utils appstream
 
+      # The templates, not the built files: these are what a contributor
+      # edits, and msgfmt only ever adds translated copies of keys that are
+      # already valid here. `meson test` checks the merged output as well.
       - name: Validate .desktop
-        run: desktop-file-validate data/io.github.SergeGris.WhiteScreen.desktop
+        run: desktop-file-validate data/io.github.SergeGris.WhiteScreen.desktop.in
 
       - name: Validate AppStream metainfo
-        run: appstreamcli validate --no-net --explain data/io.github.SergeGris.WhiteScreen.metainfo.xml
+        run: appstreamcli validate --no-net --explain data/io.github.SergeGris.WhiteScreen.metainfo.xml.in

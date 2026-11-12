@@ -155,6 +155,65 @@ jobs:
 
           Or grab the bundle below for a one-off install; it does not auto-update."
 
+  # The portable Windows build, added to the same rolling release.
+  #
+  # It runs after `build` rather than beside it, deliberately: that job
+  # publishes the release by recreating the tag, so a Windows job uploading
+  # at the same time would race it and lose its asset. Ordered, there is
+  # nothing to race -- the release already exists, and this only adds to it.
+  windows:
+    name: Build portable Windows executable
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write        # adding to the rolling release
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Only the crates without GTK in them. RUSTFLAGS has to repeat the
+      # static-CRT flag from .cargo/config.toml: setting the variable
+      # replaces that configuration rather than adding to it, and without it
+      # the executable would need the Visual C++ redistributable installed --
+      # which is the one thing a portable build must not ask for.
+      - name: Build
+        run: cargo build --locked --release -p whitescreen-win
+        env:
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
+
+      # Proof that the thing actually runs on a machine that never built it.
+      - name: Smoke test
+        run: |
+          .\target\release\whitescreen.exe --version
+          .\target\release\whitescreen.exe --help
+          .\target\release\whitescreen.exe --list-monitors --json
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\release\whitescreen.exe dist\
+          Copy-Item README.md dist\
+          Copy-Item COPYING dist\LICENSE.txt
+          Compress-Archive -Path dist\* -DestinationPath whitescreen-windows-x86_64.zip
+          Get-Item whitescreen-windows-x86_64.zip | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: whitescreen-windows
+          path: whitescreen-windows-x86_64.zip
+          if-no-files-found: error
+
+      # Stable URL alongside the Flatpak bundle:
+      #   .../releases/download/continuous/whitescreen-windows-x86_64.zip
+      - name: Add to the rolling "continuous" release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload continuous whitescreen-windows-x86_64.zip --clobber
+
   deploy:
     name: Deploy Flatpak repository
     needs: build
