@@ -2,7 +2,7 @@
 # The application is the root package; the members are the parts that must
 # build without it. `cargo build` here still builds just the application,
 # which is what Meson and the packaging call.
-members = ["core"]
+members = ["core", "platform/windows"]
 
 [package]
 name         = "whitescreen"

@@ -1,0 +1,13 @@
+# The Windows build is meant to be portable: one executable that runs from
+# wherever it was unzipped, with nothing to install first. Linking the CRT
+# statically is what removes the last thing it would otherwise need -- the
+# Visual C++ redistributable, which a machine may simply not have.
+#
+# Note for CI: a RUSTFLAGS environment variable *replaces* this, it does not
+# add to it. Anything that sets RUSTFLAGS for a Windows build has to carry
+# this flag along; .github/workflows/ci.yml does.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

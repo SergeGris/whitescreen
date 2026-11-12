@@ -1,0 +1,29 @@
+[package]
+name         = "whitescreen-win"
+version      = "1.0.0"
+edition      = "2024"
+rust-version = "1.92"
+license      = "GPL-3.0-or-later"
+description  = "Native Win32 front end for White Screen: monitor enumeration and the fullscreen colour overlays"
+
+# One portable executable: unzip and run. See src/main.rs.
+[[bin]]
+name = "whitescreen"
+path = "src/main.rs"
+
+[dependencies]
+whitescreen-core = { path = "../../core", version = "1.0.0" }
+
+# Only pulled in on Windows: on any other host this crate builds to an empty
+# library, so `cargo build` on Linux does not need the Windows SDK bindings.
+[target.'cfg(windows)'.dependencies.windows]
+version  = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]
