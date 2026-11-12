@@ -4,9 +4,25 @@ use adw::{prelude::*, subclass::prelude::*};
 use gtk::{gdk, gio, glib};
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use crate::color_surface;
+use crate::color_surface::{self, Fill};
+use crate::i18n::gettext;
 
 const NOTICE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Registered once per display, like the other windows' styles.
+static CSS_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// The window paints nothing of its own.
+///
+/// It matters for the half-screen fills: the surface simply leaves the other
+/// half unpainted, and without this the window's own background would sit
+/// there instead of whatever the overlay is being compared against.
+const CSS: &str = "
+.whitescreen-overlay {
+    background-color: transparent;
+    background-image: none;
+}
+";
 
 /// Whether this keystroke should take the overlays down.
 ///
@@ -31,6 +47,28 @@ fn dismisses_overlay(key: gdk::Key, state: gdk::ModifierType) -> bool {
             | gdk::ModifierType::META_MASK
             | gdk::ModifierType::HYPER_MASK,
     )
+}
+
+/// What this keystroke asks the overlay to do, if anything, as the name of an
+/// application action.
+///
+/// Every one of them is a Ctrl combination, and that is not a style choice: a
+/// bare key takes the overlay down (see `dismisses_overlay`), and being able
+/// to get out with whatever key you hit first is the one promise here that
+/// must not be broken to add a shortcut.
+fn overlay_action(key: gdk::Key, state: gdk::ModifierType) -> Option<&'static str> {
+    if !state.contains(gdk::ModifierType::CONTROL_MASK) {
+        return None;
+    }
+    match key {
+        // Arrows for anyone who tries them, n/p for anyone who lives in a
+        // pager. Up and Down as well as Left and Right, because the strip
+        // these walk is a queue and not a direction on the screen.
+        gdk::Key::Right | gdk::Key::Down | gdk::Key::n | gdk::Key::N => Some("cycle-next"),
+        gdk::Key::Left  | gdk::Key::Up   | gdk::Key::p | gdk::Key::P => Some("cycle-prev"),
+        gdk::Key::space => Some("cycle-pause"),
+        _ => None,
+    }
 }
 
 /// Keys that only ever modify another key. Reaching for Ctrl or Super is not
@@ -64,6 +102,9 @@ mod imp {
         pub color_surface:    color_surface::ColorSurface,
         pub toast_overlay:    adw::ToastOverlay,
         pub notice_visible:   Cell<bool>,
+        /// Whether there is a queue to step through, so the notice can say
+        /// which keys do it. The window knows; this does not.
+        pub cycle_hint:       Cell<bool>,
         pub last_pointer_pos: RefCell<Option<(f64, f64)>>,
         /// Monitor this window is currently showing on.
         ///
@@ -79,6 +120,7 @@ mod imp {
                 color_surface:   color_surface::ColorSurface::new(),
                 toast_overlay:   adw::ToastOverlay::new(),
                 notice_visible:  Cell::new(false),
+                cycle_hint:      Cell::new(false),
                 last_pointer_pos: RefCell::new(None),
                 bound:           RefCell::new(None),
             }
@@ -99,15 +141,23 @@ mod imp {
             if self.notice_visible.get() { return; }
             self.notice_visible.set(true);
 
+            let mut title = if crate::layer_shell_available() {
+                gettext("Press any key to exit")
+            } else {
+                // Fallback overlays are ordinary windows, so only the focused
+                // one hears the keyboard; clicking works on any of them.
+                gettext("Press any key or click to exit")
+            };
+            // Named here or nowhere: the keys are deliberately Ctrl
+            // combinations so that they cannot be hit by accident, which also
+            // makes them impossible to stumble upon.
+            if self.cycle_hint.get() {
+                title.push_str("  ·  ");
+                title.push_str(&gettext("Ctrl+→ next color, Ctrl+Space pause"));
+            }
+
             let toast = adw::Toast::builder()
-                .title(if crate::layer_shell_available() {
-                    "Press any key to exit"
-                } else {
-                    // Fallback overlays are ordinary windows, so only the
-                    // focused one hears the keyboard; clicking works on any
-                    // of them.
-                    "Press any key or click to exit"
-                })
+                .title(&title)
                 .timeout(super::NOTICE_TIMEOUT.as_secs() as u32)
                 .build();
 
@@ -161,6 +211,19 @@ mod imp {
                 }
             }
             win.set_decorated(false);
+            win.add_css_class("whitescreen-overlay");
+
+            if let Some(display) = gdk::Display::default() {
+                super::CSS_ONCE.call_once(move || {
+                    let provider = gtk::CssProvider::new();
+                    provider.load_from_string(super::CSS);
+                    gtk::style_context_add_provider_for_display(
+                        &display,
+                        &provider,
+                        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                    );
+                });
+            }
 
             // ── Widget tree ────────────────────────────────────────────
             self.toast_overlay.set_child(Some(&self.color_surface));
@@ -186,6 +249,14 @@ mod imp {
                 #[weak] win,
                 #[upgrade_or] glib::Propagation::Proceed,
                 move |_, key, _, state| {
+                    // Acting on the colour comes first: these are shortcuts,
+                    // which dismisses_overlay() deliberately passes through.
+                    if let Some(action) = overlay_action(key, state) {
+                        if let Some(app) = win.application() {
+                            app.activate_action(action, None);
+                        }
+                        return glib::Propagation::Stop;
+                    }
                     if !dismisses_overlay(key, state) {
                         return glib::Propagation::Proceed;
                     }
@@ -288,6 +359,16 @@ mod imp {
             self.imp().arm_notice();
         }
 
+        /// What covers this screen: a colour, part of one, or a pattern.
+        pub fn set_fill(&self, fill: Fill) {
+            self.imp().color_surface.set_fill(fill);
+        }
+
+        /// Whether the notice should name the keys that step the queue.
+        pub fn set_cycle_hint(&self, hint: bool) {
+            self.imp().cycle_hint.set(hint);
+        }
+
         /// Detach from the monitor this window was bound to.
         ///
         /// Called when that monitor is unplugged. The window outlives the
@@ -312,10 +393,10 @@ mod imp {
             // Restoring the cursor is cosmetic; skip it rather than touch a
             // surface that may already be gone (teardown, or a layer-shell
             // remap triggered by set_monitor()).
-            if self.is_realized() {
-                if let Some(surface) = self.surface() {
-                    surface.set_cursor(None);
-                }
+            if self.is_realized()
+                && let Some(surface) = self.surface()
+            {
+                surface.set_cursor(None);
             }
             self.set_visible(false);
         }
@@ -358,5 +439,37 @@ mod tests {
     fn shift_still_dismisses() {
         // Shift+A is an ordinary keystroke, not a shortcut.
         assert!(dismisses_overlay(gdk::Key::A, gdk::ModifierType::SHIFT_MASK));
+    }
+
+    const CTRL: gdk::ModifierType = gdk::ModifierType::CONTROL_MASK;
+
+    #[test]
+    fn ctrl_arrows_step_the_queue() {
+        for key in [gdk::Key::Right, gdk::Key::Down, gdk::Key::n, gdk::Key::N] {
+            assert_eq!(overlay_action(key, CTRL), Some("cycle-next"), "{key:?}");
+        }
+        for key in [gdk::Key::Left, gdk::Key::Up, gdk::Key::p, gdk::Key::P] {
+            assert_eq!(overlay_action(key, CTRL), Some("cycle-prev"), "{key:?}");
+        }
+        assert_eq!(overlay_action(gdk::Key::space, CTRL), Some("cycle-pause"));
+    }
+
+    #[test]
+    fn the_same_keys_without_ctrl_just_dismiss() {
+        // Otherwise a stray arrow key would leave someone stuck behind a
+        // full-screen colour wondering which key works.
+        for key in [gdk::Key::Right, gdk::Key::space, gdk::Key::n, gdk::Key::Up] {
+            assert_eq!(overlay_action(key, gdk::ModifierType::empty()), None, "{key:?}");
+            assert!(dismisses_overlay(key, gdk::ModifierType::empty()), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn stepping_does_not_swallow_the_quit_accelerator() {
+        // Ctrl+Q has to reach the application, and Ctrl held with anything
+        // else this does not act on must pass through untouched.
+        for key in [gdk::Key::q, gdk::Key::w, gdk::Key::Escape, gdk::Key::Tab] {
+            assert_eq!(overlay_action(key, CTRL), None, "{key:?}");
+        }
     }
 }

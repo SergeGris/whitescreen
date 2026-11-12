@@ -4,64 +4,39 @@ use adw::{prelude::*, subclass::prelude::*};
 use gtk::{gdk, gio, glib};
 
 use crate::color_surface;
+use crate::color;
+use crate::color_surface::Fill;
+use crate::cycle_bar::CycleBar;
+use crate::fill_bar::{FillBar, Mode as FillMode};
 use crate::monitor_label;
+use crate::monitor_list::{self, MonitorList};
+use crate::palette::Palette;
 use crate::screen_overlay::ScreenOverlay;
 use crate::settings::Settings;
+use crate::tile;
 
 #[cfg(feature = "gamma")]
 use crate::gamma::GammaListener;
+use crate::i18n::{self, gettext};
 
 // Minimum preview size; it expands to fill the pane.
 const PREVIEW_W: i32 = 480;
 const PREVIEW_H: i32 = 270; // 16:9
 
-/// Colour the custom chip starts on. Cyan rather than white so the chip is
-/// visibly *not* one of the presets on a first run, and so clicking it does
-/// something even before the picker has ever been opened.
-const DEFAULT_CUSTOM: gdk::RGBA = gdk::RGBA::new(0.0, 1.0, 1.0, 1.0);
-
-/// Name stored in the settings file when the custom chip is the selected one.
-const CUSTOM_CHIP: &str = "Custom";
-
 /// Shown by whatever is asked to keep the screen on, where it displays a
 /// reason -- so it says something the user would recognise.
 const IDLE_REASON: &str = "A color overlay is showing";
 
-/// Cycle bounds, in seconds. The floor is 0.5 s deliberately: a full-screen
-/// colour flashing faster than that starts to approach the flash rate that
-/// photosensitive-epilepsy guidance warns about, and no dead-pixel check
-/// needs it.
-const CYCLE_MIN:     f64 = 0.5;
-const CYCLE_MAX:     f64 = 60.0;
-const CYCLE_STEP:    f64 = 0.5;
-const CYCLE_DEFAULT: f64 = 2.0;
+/// Brightness bounds, as a percentage of the chosen colour.
+///
+/// The floor is not zero: a slider that can turn the screen black is a slider
+/// that can make the app look broken, and Black is a chip already.
+const BRIGHTNESS_MIN: f64 = 5.0;
+const BRIGHTNESS_MAX: f64 = 100.0;
 
-fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    use std::f64::consts::{FRAC_PI_2, PI};
-    cr.new_sub_path();
-    cr.arc(x + w - r, y + r,     r, -FRAC_PI_2,       0.0         );
-    cr.arc(x + w - r, y + h - r, r,  0.0,              FRAC_PI_2  );
-    cr.arc(x + r,     y + h - r, r,  FRAC_PI_2,        PI         );
-    cr.arc(x + r,     y + r,     r,  PI,       3.0 * FRAC_PI_2    );
-    cr.close_path();
-}
-
-pub fn monitor_title(mon: &gdk::Monitor, index: usize) -> String {
-    mon.connector()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("Monitor {}", index + 1))
-}
-
-pub fn monitor_subtitle(mon: &gdk::Monitor) -> String {
-    [mon.model(), mon.manufacturer()]
-        .into_iter()
-        .flatten()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-        .join(" — ")
-}
+/// Longest auto-hide delay offered, in minutes. Four hours is well past any
+/// exerciser run; past that, leaving the screen lit is a deliberate choice.
+const AUTO_HIDE_MAX: f64 = 240.0;
 
 fn build_status_bar(
     #[cfg(feature = "gamma")] gamma_icon:  &gtk::Image,
@@ -88,7 +63,7 @@ fn build_status_bar(
     );
     left.append(
         &gtk::Label::builder()
-            .label("Press any key to exit the overlay")
+            .label(gettext("Press any key to exit the overlay"))
             .css_classes(["dim-label"])
             .build(),
     );
@@ -113,21 +88,6 @@ fn build_status_bar(
 
     bar.upcast()
 }
-
-// ── Colour presets ────────────────────────────────────────────────────────────
-
-struct Preset {
-    name: &'static str,
-    rgba: gdk::RGBA,
-}
-
-const PRESETS: &[Preset] = &[
-    Preset { name: "White",   rgba: gdk::RGBA::WHITE },
-    Preset { name: "Black",   rgba: gdk::RGBA::BLACK },
-    Preset { name: "Red",     rgba: gdk::RGBA::RED   },
-    Preset { name: "Green",   rgba: gdk::RGBA::GREEN },
-    Preset { name: "Blue",    rgba: gdk::RGBA::BLUE  },
-];
 
 // ── MainWindow ────────────────────────────────────────────────────────────────
 
@@ -174,7 +134,7 @@ fn monitor_ident(mon: &gdk::Monitor) -> String {
 /// Keys for a whole monitor list at once, so that indistinguishable monitors
 /// (two of the same model, neither reporting a connector) get "...#2", "...#3"
 /// suffixes instead of sharing one key and being selected as a single unit.
-fn monitor_keys(mons: &[gdk::Monitor]) -> Vec<String> {
+pub fn monitor_keys(mons: &[gdk::Monitor]) -> Vec<String> {
     dedup_idents(mons.iter().map(monitor_ident))
 }
 
@@ -210,15 +170,36 @@ mod imp {
     pub struct MainWindow {
         /// Current monitors, rebuilt on every hot-plug event.
         pub entries:  RefCell<Vec<MonitorEntry>>,
-        /// Selected monitors, keyed by `monitor_keys()` so the choice
-        /// survives unplug/replug rather than being tied to a list
-        /// position. Keys for absent monitors are kept, not pruned: that
-        /// is what makes a replug restore the selection.
-        pub selected: RefCell<HashSet<String>>,
         /// Colour currently applied, so overlays created by a later hot-plug
         /// start out matching the ones already on screen.
+        ///
+        /// The colour as *chosen*, before brightness is applied: it is what
+        /// the chips and the queue compare against, and scaling it here would
+        /// stop a dimmed white from marking the White chip.
         pub color:    Cell<gdk::RGBA>,
         pub identify: Cell<bool>,
+
+        /// Which monitor the Choose Color card is aimed at, by key; `None`
+        /// means the shared colour, which is every monitor that has not been
+        /// given one of its own.
+        ///
+        /// Not saved: it is where you are working, not what you chose.
+        pub target:   RefCell<Option<String>>,
+        /// Set while the card is being brought in line with the colour it
+        /// edits; see `sync_card()`.
+        pub syncing:  Cell<bool>,
+
+        /// Brightness every colour is scaled by on its way to a screen, as a
+        /// fraction. A panel used as a key light is usually too bright at
+        /// full output, and reaching for the picker to dim one is both
+        /// awkward and destructive -- it loses the colour you picked.
+        pub brightness: Cell<f64>,
+
+        /// Minutes an overlay stays up before taking itself down, 0 for
+        /// never. The exerciser wants minutes of running and the room it is
+        /// in may not have anyone in it.
+        pub auto_hide:  Cell<u32>,
+        pub auto_hide_source: RefCell<Option<glib::SourceId>>,
 
         /// True while show_selected() has overlays up, so that a monitor
         /// plugged in mid-session is covered too instead of staying the
@@ -226,6 +207,17 @@ mod imp {
         pub overlays_shown: Cell<bool>,
         /// Set while a sync is queued on the main loop; see schedule_sync().
         pub sync_queued: Cell<bool>,
+
+        /// Saved UI state, read once at startup and written back as it
+        /// changes.
+        pub settings:    Settings,
+        /// Set while a write is queued on the main loop; see queue_save().
+        pub save_queued: Cell<bool>,
+
+        /// True when this window was built to serve a command line and never
+        /// shown. It still does all the work -- it owns the overlays and the
+        /// hot-plug reconcile -- it just stays out of the way.
+        pub headless: Cell<bool>,
 
         // Widgets that outlive build_ui because hot-plug has to update them.
         /// Windows for monitors that are not currently attached. They are
@@ -240,35 +232,40 @@ mod imp {
         /// by the number of distinct monitors seen in one session.
         pub graveyard: RefCell<Vec<MonitorEntry>>,
 
-        pub mon_box:   RefCell<Option<gtk::Box>>,
+        /// The sidebar, which owns the monitor selection.
+        pub monitors:  RefCell<Option<MonitorList>>,
         pub show_btn:  RefCell<Option<gtk::Button>>,
+        /// The Identify toggle, so that `--identify` can drive it rather than
+        /// setting the state behind its back.
+        pub ident_btn: RefCell<Option<gtk::ToggleButton>>,
         pub preview:   RefCell<Option<color_surface::ColorSurface>>,
 
-        /// Preset chips in `PRESETS` order, so the cycle timer can drive the
-        /// selection through the same widgets the user clicks.
-        pub presets:    RefCell<Vec<gtk::CheckButton>>,
-        pub custom_btn: RefCell<Option<gtk::CheckButton>>,
-        /// Colour behind the custom chip. Kept here rather than in the chip's
-        /// closure so the swatch, the picker and the saved settings all read
-        /// the same value.
-        pub custom_rgba: Cell<gdk::RGBA>,
+        /// The colour chips.
+        pub palette: RefCell<Option<Palette>>,
+        /// The brightness slider and the auto-hide delay, kept so the command
+        /// line and the settings file can drive them.
+        pub brightness_scale: RefCell<Option<gtk::Scale>>,
+        pub auto_hide_spin:   RefCell<Option<gtk::SpinButton>>,
+        /// "Applies to", and the keys behind its rows -- `None` first, then
+        /// one per attached monitor, in sidebar order.
+        pub target_drop: RefCell<Option<gtk::DropDown>>,
+        /// The label and the dropdown together, so that one monitor hides
+        /// both and never leaves an "Applies to" with nothing after it.
+        pub target_aim:  RefCell<Option<gtk::Box>>,
+        pub target_keys: RefCell<Vec<Option<String>>>,
+        /// Says which monitors are keeping a colour of their own, so that
+        /// "all monitors" never silently means "all but that one".
+        pub scope_hint:  RefCell<Option<gtk::Label>>,
 
-        /// Cycle mode: step through the presets on a timer, for spotting a
-        /// dead pixel or a stuck subpixel without clicking through by hand.
-        pub cycling:       Cell<bool>,
-        pub cycle_index:   Cell<usize>,
-        pub cycle_secs:    Cell<f64>,
-        pub cycle_source:  RefCell<Option<glib::SourceId>>,
-        /// Chip that was selected when cycling started, restored when it
-        /// stops, so the mode leaves the colour it found rather than
-        /// whichever preset the timer happened to land on.
-        pub pre_cycle:     RefCell<Option<gtk::CheckButton>>,
-
-        /// Cleared after the first reconcile; see sync_monitors().
-        pub first_sync: Cell<bool>,
-
-        /// Persisted colour / selection / interval.
-        pub settings: Settings,
+        /// Cycle mode: the switch, the interval and the queue it plays.
+        pub cycle: RefCell<Option<CycleBar>>,
+        /// Region and exerciser modes: what covers a screen, as opposed to
+        /// which colour it is.
+        pub fill_bar: RefCell<Option<FillBar>>,
+        /// Colour showing when cycling started, put back when it stops, so
+        /// the mode leaves the colour it found rather than whichever step the
+        /// timer happened to land on.
+        pub pre_cycle_color: Cell<gdk::RGBA>,
 
         /// Cookie from `gtk_application_inhibit()`; 0 means "not inhibiting".
         pub idle_cookie: Cell<u32>,
@@ -280,6 +277,11 @@ mod imp {
 
         #[cfg(feature = "gamma")]
         pub gamma_listener: RefCell<Option<GammaListener>>,
+        /// Kept so the listener can be started and stopped after build_ui
+        /// has returned; see `MainWindow::sync_gamma_listener`.
+        #[cfg(feature = "gamma")]
+        pub gamma_sender: RefCell<Option<async_channel::Sender<bool>>>,
+
     }
 
     // gdk::RGBA has no Default impl, so this cannot be derived.
@@ -287,29 +289,40 @@ mod imp {
         fn default() -> Self {
             Self {
                 entries:  RefCell::new(Vec::new()),
-                selected: RefCell::new(HashSet::new()),
                 color:    Cell::new(gdk::RGBA::WHITE),
                 identify: Cell::new(false),
+                target:   RefCell::new(None),
+                syncing:  Cell::new(false),
+                brightness: Cell::new(1.0),
+                auto_hide:  Cell::new(0),
+                auto_hide_source: RefCell::new(None),
                 overlays_shown: Cell::new(false),
                 sync_queued: Cell::new(false),
+                settings:    Settings::load(),
+                save_queued: Cell::new(false),
+                headless:    Cell::new(false),
                 graveyard: RefCell::new(Vec::new()),
-                mon_box:  RefCell::new(None),
+                monitors: RefCell::new(None),
                 show_btn: RefCell::new(None),
+                ident_btn: RefCell::new(None),
                 preview:  RefCell::new(None),
-                presets:     RefCell::new(Vec::new()),
-                custom_btn:  RefCell::new(None),
-                custom_rgba: Cell::new(super::DEFAULT_CUSTOM),
-                cycling:      Cell::new(false),
-                cycle_index:  Cell::new(0),
-                cycle_secs:   Cell::new(super::CYCLE_DEFAULT),
-                cycle_source: RefCell::new(None),
-                pre_cycle:    RefCell::new(None),
-                first_sync:   Cell::new(true),
-                settings: Settings::load(),
+                palette: RefCell::new(None),
+                brightness_scale: RefCell::new(None),
+                auto_hide_spin:   RefCell::new(None),
+                target_drop: RefCell::new(None),
+                target_aim:  RefCell::new(None),
+                target_keys: RefCell::new(Vec::new()),
+                scope_hint:  RefCell::new(None),
+                cycle: RefCell::new(None),
+                fill_bar: RefCell::new(None),
+                pre_cycle_color: Cell::new(gdk::RGBA::WHITE),
                 idle_cookie: Cell::new(0),
                 idle_window: RefCell::new(None),
                 #[cfg(feature = "gamma")]
                 gamma_listener: RefCell::new(None),
+                #[cfg(feature = "gamma")]
+                gamma_sender: RefCell::new(None),
+
             }
         }
     }
@@ -345,92 +358,130 @@ impl MainWindow {
             .property("default-height", 660i32)
             .build();
         win.build_ui();
+        // After the widgets exist and before the window is seen, so the user
+        // never watches it change its mind about what was saved.
+        win.restore_settings();
         win
+    }
+
+    // ── Saved state ──────────────────────────────────────────────────────
+
+    /// Put back what the last session left.
+    ///
+    /// Order matters twice over: the custom chip's colour has to be in place
+    /// before the colour itself, or `Palette::select()` cannot recognise a
+    /// restored custom colour and leaves every chip unmarked; and the fill
+    /// mode has to come after the side and the second colour, since switching
+    /// the mode on is what publishes them.
+    fn restore_settings(&self) {
+        let s = &self.imp().settings;
+
+        if let (Some(palette), Some(rgba)) = (self.palette(), s.custom_color()) {
+            palette.set_custom_color(rgba);
+        }
+        if let Some(rgba) = s.color() {
+            self.set_color(rgba);
+        }
+        if let Some(fraction) = s.brightness() {
+            self.set_brightness(fraction);
+        }
+        if let Some(minutes) = s.auto_hide() {
+            self.set_auto_hide(minutes);
+        }
+
+        if let Some(cycle) = self.cycle() {
+            cycle.set_queue_colors(&s.queue());
+            if let Some(secs) = s.cycle_interval() {
+                cycle.set_interval(secs);
+            }
+        }
+
+        if let Some(bar) = self.imp().fill_bar.borrow().as_ref() {
+            bar.set_second_color(s.second_color());
+            if let Some(side) = s.region_side().as_deref().and_then(color_surface::Side::from_key) {
+                bar.set_side(side);
+            }
+            // An unknown name -- a file from a newer version, or a typo in a
+            // hand-edited one -- leaves the mode alone rather than resetting
+            // it to Flat without saying so.
+            if let Some(mode) = s.pattern().as_deref().and_then(FillMode::from_key) {
+                bar.set_mode(mode);
+            }
+        }
+
+        if let Some(list) = self.monitor_list() {
+            list.set_colors(&s.monitor_colors().into_iter().collect::<Vec<_>>());
+            list.set_per_monitor(s.per_monitor_colors());
+            let saved = s.monitors();
+            // An empty list means "nothing saved": honouring it would untick
+            // the first monitor that MonitorList ticks for a first run.
+            if !saved.is_empty() {
+                list.select_only(saved);
+            }
+        }
+    }
+
+    /// Queue a write of everything to the settings file.
+    ///
+    /// Coalesced onto the main loop, so that one user action -- which may
+    /// move several controls at once, each announcing itself -- costs one
+    /// write rather than one per control.
+    fn queue_save(&self) {
+        if self.imp().save_queued.replace(true) {
+            return;
+        }
+        glib::idle_add_local_once(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move || {
+                win.imp().save_queued.set(false);
+                win.save_settings();
+            }
+        ));
+    }
+
+    /// Write the current state out.
+    fn save_settings(&self) {
+        let imp = self.imp();
+        let s = &imp.settings;
+
+        // The colour the *user* chose. While the queue is playing, the colour
+        // on screen belongs to the timer and will be a different one a second
+        // from now; what deserves saving is the one it took over from.
+        let playing = self.cycle().is_some_and(|c| c.is_playing());
+        s.set_color(if playing { imp.pre_cycle_color.get() } else { imp.color.get() });
+        s.set_brightness(imp.brightness.get());
+        s.set_auto_hide(imp.auto_hide.get());
+
+        if let Some(palette) = self.palette() {
+            s.set_custom_color(palette.custom_color());
+        }
+        if let Some(cycle) = self.cycle() {
+            s.set_queue(&cycle.queue_colors());
+            s.set_cycle_interval(cycle.interval());
+        }
+        if let Some(bar) = imp.fill_bar.borrow().as_ref() {
+            s.set_pattern(bar.mode().as_key());
+            s.set_region_side(bar.side().as_key());
+            s.set_second_color(bar.second_color());
+        }
+        if let Some(list) = self.monitor_list() {
+            s.set_monitors(&list.selected());
+            s.set_per_monitor_colors(list.per_monitor());
+            s.set_monitor_colors(&list.colors());
+        }
+
+        s.save();
     }
 
     fn build_ui(&self) {
         // ── Single consolidated CSS provider ──────────────────────────
+        // Only the rules for widgets this window builds itself. The chips
+        // (palette.rs), the action tiles (tile.rs) and the monitor rows
+        // (monitor_list.rs) each register their own, once per display -- a
+        // second copy here would be a second place to edit and a silent
+        // disagreement the first time only one of them was.
         let css = gtk::CssProvider::new();
         css.load_from_string(r#"
-/* ── Preset / custom chips ──────────────────────────────────────────── */
-
-/* Hide the native indicator — selection is shown by the border.
-   A grouped GtkCheckButton renames its indicator node from "check" to
-   "radio", so the chips (which are one radio group) need both selectors:
-   with only "check" every chip drew a stray radio circle next to its
-   swatch. The monitor rows are ungrouped and keep the "check" node. */
-.preset-chip check,
-.preset-chip radio {
-    min-width: 0; min-height: 0; -gtk-icon-size: 0px;
-    opacity: 0; padding: 0; margin: 0;
-}
-.preset-chip {
-    border-radius: 14px;
-    padding: 6px;
-    border: 2px solid transparent;
-    background: transparent;
-    transition: background-color 140ms ease, border-color 140ms ease, transform 110ms ease;
-}
-.preset-chip:hover   { background: alpha(@window_fg_color, 0.05); }
-.preset-chip:checked { border-color: @accent_bg_color; background: alpha(@accent_bg_color, 0.12); }
-.preset-chip:active  { transform: scale(0.97); }
-.color-label         { font-size: 12px; font-weight: 600; opacity: 0.85; }
-
-/* Custom chip: the swatch shows the colour it will apply, with the
-   eyedropper floated on top so the chip still reads as "pick a colour".
-   The badge carries its own background because it sits on an arbitrary
-   colour -- a bare symbolic icon disappears against half of them. */
-.custom-swatch-badge {
-    background: alpha(@window_bg_color, 0.85);
-    color: @window_fg_color;
-    border-radius: 999px;
-    padding: 5px;
-}
-
-/* ── Monitor rows ───────────────────────────────────────────────────── */
-
-.monitor-check check {
-    min-width: 0; min-height: 0; -gtk-icon-size: 0px;
-    opacity: 0; padding: 0; margin: 0;
-}
-.monitor-check {
-    border-radius: 14px;
-    padding: 2px;
-    border: 2px solid transparent;
-    transition: background-color 180ms ease, border-color 180ms ease;
-}
-.monitor-check:checked {
-    background-color: alpha(@accent_bg_color, 0.10);
-    border-color:     alpha(@accent_bg_color, 0.45);
-}
-
-/* Number badge: grey → accent when checked */
-.monitor-number {
-    min-width: 28px; min-height: 28px;
-    border-radius: 999px;
-    background: alpha(@window_fg_color, 0.10);
-    color: @window_fg_color;
-    font-weight: 700; font-size: 12px;
-}
-.monitor-check:checked .monitor-number {
-    background: @accent_bg_color;
-    color: @accent_fg_color;
-}
-
-/* Right-hand selection badge: empty ring → filled accent check */
-.mon-check-badge {
-    min-width: 22px; min-height: 22px;
-    border-radius: 999px;
-    border: 2px solid alpha(@window_fg_color, 0.28);
-    color: transparent;
-    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
-}
-.monitor-check:checked .mon-check-badge {
-    background: @accent_bg_color;
-    border-color: @accent_bg_color;
-    color: @accent_fg_color;
-}
-
 /* ── Cards ──────────────────────────────────────────────────────────── */
 
 .controls-card {
@@ -439,12 +490,6 @@ impl MainWindow {
     padding: 16px 20px;
 }
 .section-title { font-weight: 700; }
-
-/* ── Action tiles ───────────────────────────────────────────────────── */
-
-.action-tile   { border-radius: 14px; padding: 8px 18px; }
-.tile-title    { font-weight: 700; }
-.tile-subtitle { font-size: 12px; opacity: 0.80; }
 
 /* ── Preview ────────────────────────────────────────────────────────── */
 
@@ -476,16 +521,17 @@ impl MainWindow {
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(
             &adw::WindowTitle::builder()
-                .title("White Screen")
-                .subtitle("Display color overlay")
+                .title(gettext("White Screen"))
+                .subtitle(gettext("Display color overlay"))
                 .build(),
         ));
         let menu_btn = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
-            .tooltip_text("Menu")
+            .tooltip_text(gettext("Menu"))
             .build();
         let menu = gio::Menu::new();
         menu.append(Some("About White Screen"), Some("win.about"));
+        menu_btn.update_property(&[gtk::accessible::Property::Label(&gettext("Main menu"))]);
         menu_btn.set_menu_model(Some(&menu));
         header.pack_end(&menu_btn);
 
@@ -502,14 +548,14 @@ impl MainWindow {
                     .license_type(gtk::License::Gpl30)
                     .website(crate::WEBSITE)
                     .issue_url("https://github.com/SergeGris/whitescreen/issues")
-                    .comments("Fill any monitor with a solid color.")
+                    .comments(gettext("Fill any monitor with a solid color."))
                     .build()
                     .present(Some(&win));
             }
         ));
         self.add_action(&about);
 
-        // App-scoped so ScreenOverlay's ESC handler can reach it without
+        // App-scoped so ScreenOverlay's key handler can reach them without
         // holding a reference back to this window.
         if let Some(app) = self.application() {
             let hide = gio::SimpleAction::new("hide-overlays", None);
@@ -518,6 +564,31 @@ impl MainWindow {
                 move |_, _| win.hide_all_overlays()
             ));
             app.add_action(&hide);
+
+            // Stepping and pausing from the overlay. The whole argument for
+            // the cycle is that a dead-pixel check should not mean looking
+            // away from the panel -- and the overlay covers the window these
+            // controls live in, so without these the only way to take the
+            // next colour is to look away and click.
+            for (name, forward) in [("cycle-next", true), ("cycle-prev", false)] {
+                let step = gio::SimpleAction::new(name, None);
+                step.connect_activate(glib::clone!(
+                    #[weak(rename_to = win)] self,
+                    move |_, _| if let Some(cycle) = win.cycle() {
+                        cycle.step(forward);
+                    }
+                ));
+                app.add_action(&step);
+            }
+
+            let pause = gio::SimpleAction::new("cycle-pause", None);
+            pause.connect_activate(glib::clone!(
+                #[weak(rename_to = win)] self,
+                move |_, _| if let Some(cycle) = win.cycle() {
+                    cycle.toggle_pause();
+                }
+            ));
+            app.add_action(&pause);
         }
 
         // ESC on this window hides the overlays too.
@@ -552,30 +623,9 @@ impl MainWindow {
         // ── Action tiles (built BEFORE the monitor loop so the monitor
         //    toggles can weakly reference show_btn) ─────────────────────
 
-        fn innerr(icon: &str, titles: impl AsRef<str>, subtitles: impl AsRef<str>) -> gtk::Box {
-            let icon = gtk::Image::from_icon_name(icon);
-            icon.set_pixel_size(20);
-            let title = gtk::Label::builder()
-                .label(titles.as_ref())
-                .css_classes(["tile-title"])
-                .halign(gtk::Align::Start)
-                .build();
-            let subtitle = gtk::Label::builder()
-                .label(subtitles.as_ref())
-                .css_classes(["tile-subtitle"])
-                .halign(gtk::Align::Start)
-                .build();
-            let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).halign(gtk::Align::Start).build();
-            text.append(&title);
-            text.append(&subtitle);
-            let inner = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).build();
-            inner.append(&icon);
-            inner.append(&text);
-            inner
-        }
-
         let show_btn = gtk::Button::builder()
-            .child(&innerr("video-display-symbolic", "Show on selected", "Fill selected monitors"))
+            .child(&tile::content("video-display-symbolic", &gettext("Show on selected"), &gettext("Fill selected monitors")))
+
             .css_classes(["suggested-action", "action-tile"])
             .sensitive(false) // sync_monitors() enables it once a monitor is selected
             .build();
@@ -586,28 +636,29 @@ impl MainWindow {
         self.imp().show_btn.replace(Some(show_btn.clone()));
 
         let ident_btn = gtk::ToggleButton::builder()
-            .tooltip_text("Show monitor connector labels on each screen")
+            .tooltip_text(gettext("Show monitor connector labels on each screen"))
             .css_classes(["action-tile"])
-            .child(&innerr("dialog-information-symbolic", "Identify", "Identify each monitor"))
+            .child(&tile::content("dialog-information-symbolic", &gettext("Identify"), &gettext("Identify each monitor")))
             .build();
         ident_btn.connect_toggled(glib::clone!(
             #[weak(rename_to = win)] self,
             move |btn| win.set_identify(btn.is_active())
         ));
+        self.imp().ident_btn.replace(Some(ident_btn.clone()));
         if !crate::layer_shell_available() {
             // The badge is a window anchored to a monitor corner and made
             // click-through, which is exactly what layer shell is for and
             // what an ordinary toplevel cannot be asked to do.
             ident_btn.set_sensitive(false);
-            ident_btn.set_tooltip_text(Some(
+            ident_btn.set_tooltip_text(Some(&gettext(
                 "Identify needs wlr-layer-shell, which this compositor does not support",
-            ));
+            )));
         }
 
         let hide_btn = gtk::Button::builder()
-            .child(&innerr("view-conceal-symbolic", "Hide ALL", "Hide all overlays"))
+            .child(&tile::content("view-conceal-symbolic", &gettext("Hide ALL"), &gettext("Hide all overlays")))
             .css_classes(["action-tile"])
-            .tooltip_text("Hide the overlay on all monitors (or press ESC on the overlay)")
+            .tooltip_text(gettext("Hide the overlay on all monitors (or press ESC on the overlay)"))
             .build();
         hide_btn.connect_clicked(glib::clone!(
             #[weak(rename_to = win)] self,
@@ -623,90 +674,81 @@ impl MainWindow {
         action_bar.append(&hide_btn);
         action_bar.append(&ident_btn);
 
+        // ── Fill modes ────────────────────────────────────────────────
+        // Off by default: covering a screen with a colour is what the app is
+        // for, and neither of these should stand in front of that.
+        let fill_bar = FillBar::new();
+        self.imp().fill_bar.replace(Some(fill_bar.clone()));
+        fill_bar.connect_changed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |_| {
+                win.apply_fill();
+                win.queue_save();
+            }
+        ));
+
         // ── Cycle mode ────────────────────────────────────────────────
-        // A dead-pixel check means looking at red, then green, then blue,
-        // then white, then black, and a stuck subpixel only shows up on one
-        // of them. Doing that by hand means looking away from the screen to
-        // click every time; the timer keeps both eyes on the panel.
-        let cycle_btn = gtk::ToggleButton::builder()
-            .css_classes(["action-tile"])
-            .tooltip_text("Step through the preset colors on a timer")
-            .child(&innerr("media-playlist-repeat-symbolic", "Cycle", "Step through colors"))
-            .build();
+        // The switch, the interval and the queue it plays are one component;
+        // see cycle_bar.rs. This window owns only the two ends of it: telling
+        // it when there is an overlay to play onto, and handing the colour
+        // over to it (and taking it back) when it does.
+        let cycle = CycleBar::new();
+        self.imp().cycle.replace(Some(cycle.clone()));
 
-        let cycle_secs = self
-            .imp()
-            .settings
-            .cycle_interval()
-            // A hand-edited or truncated settings file must not be able to
-            // set a flash rate the UI itself refuses to offer.
-            .filter(|s| (CYCLE_MIN..=CYCLE_MAX).contains(s))
-            .unwrap_or(CYCLE_DEFAULT);
-        self.imp().cycle_secs.set(cycle_secs);
-
-        let cycle_spin = gtk::SpinButton::with_range(CYCLE_MIN, CYCLE_MAX, CYCLE_STEP);
-        cycle_spin.set_digits(1);
-        cycle_spin.set_value(cycle_secs);
-        cycle_spin.set_tooltip_text(Some("Seconds on each color"));
-        cycle_spin.connect_value_changed(glib::clone!(
+        // The sequence playing, or a step taken by hand from an overlay:
+        // always the shared colour. sync_card() marks the matching chip.
+        cycle.connect_color_chosen(glib::clone!(
             #[weak(rename_to = win)] self,
-            move |spin| win.set_cycle_interval(spin.value())
+            move |_, rgba| win.apply_color(rgba)
+        ));
+        // A swatch clicked in the strip is a colour chosen in the card, and
+        // goes wherever the card is aimed.
+        cycle.connect_color_activated(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |_, rgba| win.choose_color(rgba)
+        ));
+        cycle.connect_playing_changed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |_, playing| win.on_cycling_changed(playing)
+        ));
+        cycle.connect_state_changed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |_| win.queue_save()
         ));
 
-        cycle_btn.connect_toggled(glib::clone!(
+        // ── Monitor list ──────────────────────────────────────────────
+        // It owns the selection; this window only asks which keys are ticked
+        // when it comes to put a colour on a screen.
+        let monitors = MonitorList::new();
+        self.imp().monitors.replace(Some(monitors.clone()));
+        monitors.connect_colors_changed(glib::clone!(
             #[weak(rename_to = win)] self,
-            move |btn| win.set_cycling(btn.is_active())
+            move |_| {
+                win.refresh_colors();
+                win.queue_save();
+            }
         ));
-
-        let cycle_row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .halign(gtk::Align::Center)
-            .build();
-        cycle_row.append(&cycle_btn);
-        cycle_row.append(
-            &gtk::Label::builder().label("every").css_classes(["dim-label"]).build(),
-        );
-        cycle_row.append(&cycle_spin);
-        cycle_row.append(
-            &gtk::Label::builder().label("s").css_classes(["dim-label"]).build(),
-        );
-
-        // ── Monitor check list ────────────────────────────────────────
-        let mon_heading = gtk::Label::builder()
-            .label("Monitors")
-            .halign(gtk::Align::Start)
-            .css_classes(["title-4"])
-            .build();
-        let mon_subheading = gtk::Label::builder()
-            .label("Select one or more monitors")
-            .halign(gtk::Align::Start)
-            .css_classes(["dim-label"])
-            .build();
-
-        let mon_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(6)
-            .margin_top(12).margin_bottom(12)
-            .margin_start(12).margin_end(12)
-            .build();
-        mon_box.append(&mon_heading);
-        mon_box.append(&mon_subheading);
-
-        // Rows live in their own box so rebuild_monitor_rows() can clear
-        // and repopulate it on hot-plug without touching the headings.
-        let rows_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(6)
-            .build();
-        mon_box.append(&rows_box);
-        self.imp().mon_box.replace(Some(rows_box));
+        // Clicking a row's swatch aims the card at that monitor: the sidebar
+        // and the card are two views of one choice, not two controls.
+        monitors.connect_target_requested(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |_, key| win.set_target(Some(key))
+        ));
+        monitors.connect_selection_changed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |list| {
+                if let Some(btn) = win.imp().show_btn.borrow().as_ref() {
+                    btn.set_sensitive(list.any_attached_selected());
+                }
+                win.queue_save();
+            }
+        ));
 
         let scroller = gtk::ScrolledWindow::builder()
             .min_content_width(300)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&mon_box)
+            .child(&monitors)
             .build();
 
         let sidebar = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
@@ -725,6 +767,11 @@ impl MainWindow {
         preview.add_css_class("preview-surface");
         self.imp().preview.replace(Some(preview.clone()));
 
+        // The preview is the one colour surface worth announcing, so it
+        // opts back out of the presentation role the others take, and its
+        // label follows the colour (see apply_color).
+        preview.set_accessible_role(gtk::AccessibleRole::Img);
+
         let preview_frame = gtk::Frame::builder()
             .child(&preview)
             .css_classes(["preview-frame"])
@@ -738,8 +785,11 @@ impl MainWindow {
             .valign(gtk::Align::End)
             .margin_end(16)
             .margin_bottom(16)
-            .tooltip_text("Show on selected monitors")
+            .tooltip_text(gettext("Show on selected monitors"))
             .build();
+        expand_btn.update_property(&[gtk::accessible::Property::Label(
+            "Show on the selected monitors",
+        )]);
         expand_btn.connect_clicked(glib::clone!(
             #[weak(rename_to = win)] self,
             move |_| win.show_selected()
@@ -752,231 +802,23 @@ impl MainWindow {
         preview_overlay.add_overlay(&expand_btn);
 
         // ── Preset chips + custom ─────────────────────────────────────
-        let preset_row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .halign(gtk::Align::Center)
-            .build();
-
-        let mut group_root: Option<gtk::CheckButton> = None;
-
-        for &Preset { name, rgba } in PRESETS {
-            let swatch = gtk::DrawingArea::builder()
-                .width_request(64).height_request(40)
-                .build();
-            swatch.set_draw_func(move |_, cr, w, h| {
-                rounded_rect(cr, 0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0, 12.0);
-                cr.set_source_rgba(rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, 1.0);
-                let _ = cr.fill_preserve();
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
-                cr.set_line_width(1.0);
-                let _ = cr.stroke();
-            });
-
-            let inner = gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .spacing(6)
-                .margin_top(6).margin_bottom(6)
-                .margin_start(8).margin_end(8)
-                .build();
-            inner.append(&swatch);
-            inner.append(
-                &gtk::Label::builder()
-                    .label(name)
-                    .css_classes(["color-label"])
-                    .halign(gtk::Align::Center)
-                    .build(),
-            );
-
-            let btn = gtk::CheckButton::builder()
-                .child(&inner)
-                .css_classes(["preset-chip"])
-                .build();
-
-            if let Some(root) = &group_root {
-                btn.set_group(Some(root));
-            } else {
-                group_root = Some(btn.clone());
-            }
-
-            btn.set_cursor_from_name(Some("pointer"));
-            btn.connect_toggled(glib::clone!(
-                #[weak(rename_to = win)] self,
-                move |b| {
-                    if !b.is_active() {
-                        return;
-                    }
-                    win.apply_color(rgba);
-                    win.remember_chip(name);
-                }
-            ));
-
-            self.imp().presets.borrow_mut().push(btn.clone());
-            preset_row.append(&btn);
-        }
-
-        // Custom chip — a swatch of the custom colour with the eyedropper on
-        // top, in the same group as the presets. It used to be an eyedropper
-        // and nothing else, which made the one chip whose colour is not
-        // implied by its name also the only one that never showed it.
-        self.imp()
-            .custom_rgba
-            .set(self.imp().settings.custom_color().unwrap_or(DEFAULT_CUSTOM));
-
-        let custom_swatch = gtk::DrawingArea::builder()
-            .width_request(64).height_request(40)
-            .build();
-        custom_swatch.set_draw_func(glib::clone!(
+        let palette = Palette::new();
+        self.imp().palette.replace(Some(palette.clone()));
+        palette.connect_color_chosen(glib::clone!(
             #[weak(rename_to = win)] self,
-            move |_, cr, w, h| {
-                let rgba = win.imp().custom_rgba.get();
-                rounded_rect(cr, 0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0, 12.0);
-                cr.set_source_rgba(rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, 1.0);
-                let _ = cr.fill_preserve();
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
-                cr.set_line_width(1.0);
-                let _ = cr.stroke();
-            }
+            move |_, rgba| win.choose_color(rgba)
         ));
-
-        let custom_badge = gtk::Image::builder()
-            .icon_name("color-select-symbolic")
-            .pixel_size(16)
-            .css_classes(["custom-swatch-badge"])
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build();
-
-        let custom_stack = gtk::Overlay::builder().child(&custom_swatch).build();
-        custom_stack.add_overlay(&custom_badge);
-
-        let custom_inner = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(6)
-            .margin_top(6).margin_bottom(6)
-            .margin_start(8).margin_end(8)
-            .build();
-        custom_inner.append(&custom_stack);
-        custom_inner.append(
-            &gtk::Label::builder()
-                .label("Custom")
-                .css_classes(["color-label"])
-                .halign(gtk::Align::Center)
-                .build(),
-        );
-
-        let custom_btn = gtk::CheckButton::builder()
-            .child(&custom_inner)
-            .css_classes(["preset-chip"])
-            .tooltip_text("Pick a custom color")
-            .build();
-        custom_btn.set_cursor_from_name(Some("pointer"));
-        if let Some(root) = &group_root {
-            custom_btn.set_group(Some(root));
-        }
-
-        let custom_dialog = gtk::ColorDialog::builder()
-            .title("Select custom color")
-            .with_alpha(false)
-            .modal(true)
-            .build();
-
-        self.imp().custom_btn.replace(Some(custom_btn.clone()));
-
-        // Selecting the chip only re-applies the stored custom colour.
-        custom_btn.connect_toggled(glib::clone!(
-            #[weak(rename_to = win)] self,
-            move |btn| {
-                if !btn.is_active() {
-                    return;
-                }
-                win.apply_color(win.imp().custom_rgba.get());
-                win.remember_chip(CUSTOM_CHIP);
-            }
-        ));
-
-        // Opening the picker is driven by the *click*, not by `toggled`.
-        // A CheckButton in a radio group emits no `toggled` when it is
-        // already active, so the old code could never reopen the dialog:
-        // once Custom was selected the user had to pick another preset and
-        // come back just to change the colour.
-        let custom_click = gtk::GestureClick::new();
-        custom_click.connect_released(glib::clone!(
-            #[weak(rename_to = win)] self,
-            #[weak] custom_btn,
-            #[weak] custom_swatch,
-            #[strong] custom_dialog,
-            move |_, _, _, _| {
-                custom_btn.set_active(true);
-                custom_dialog.choose_rgba(
-                    Some(&win),
-                    Some(&win.imp().custom_rgba.get()),
-                    gio::Cancellable::NONE,
-                    glib::clone!(
-                        #[weak] win,
-                        #[weak] custom_swatch,
-                        move |res| {
-                            // Err = the user cancelled; keep the previous
-                            // custom colour rather than leaving the chip
-                            // selected but showing something stale.
-                            let Ok(rgba) = res else { return };
-                            win.imp().custom_rgba.set(rgba);
-                            custom_swatch.queue_draw();
-                            win.apply_color(rgba);
-                            // The chip itself was recorded by the
-                            // set_active() above; only the colour is new.
-                            let settings = &win.imp().settings;
-                            settings.set_custom_color(rgba);
-                            settings.save();
-                        }
-                    ),
-                );
-            }
-        ));
-        custom_btn.add_controller(custom_click);
-        preset_row.append(&custom_btn);
-
-        // Restore the chip from the last session, falling back to the first
-        // preset. (That fallback used to search for BLACK despite the comment
-        // and despite WHITE being PRESETS[0], so the app called "White Screen"
-        // opened on black.)
-        //
-        // Activating the chip is enough to apply its colour: every chip's
-        // `toggled` handler calls apply_color().
-        let saved_chip = self.imp().settings.chip();
-        let restored = match saved_chip.as_deref() {
-            Some(CUSTOM_CHIP) => {
-                custom_btn.set_active(true);
-                true
-            }
-            Some(name) => {
-                match PRESETS.iter().position(|p| p.name == name) {
-                    Some(i) => {
-                        self.imp().presets.borrow()[i].set_active(true);
-                        true
-                    }
-                    // A chip that no longer exists, e.g. a settings file
-                    // written by a version with a different preset list.
-                    None => false,
-                }
-            }
-            None => false,
-        };
-        if !restored {
-            if let Some(btn) = self.imp().presets.borrow().first() {
-                btn.set_active(true);
-            }
-        }
+        palette.select_default();
 
         // ── Gamma status indicator (feature-gated) ────────────────────
         #[cfg(feature = "gamma")]
         let gamma_icon = gtk::Image::builder()
             .icon_name("weather-clear-symbolic") // sun = normal rendering
             .pixel_size(16)
-            .tooltip_text("No color filter")
+            .tooltip_text(gettext("No color filter"))
             .build();
         #[cfg(feature = "gamma")]
-        let gamma_label = gtk::Label::new(Some("Gamma control is inactive"));
+        let gamma_label = gtk::Label::new(Some(&gettext("Gamma control is inactive")));
 
         #[cfg(feature = "gamma")]
         {
@@ -1006,15 +848,18 @@ impl MainWindow {
             // thread and polls the compositor. Setting WHITESCREEN_NO_GAMMA
             // leaves the indicator at "inactive" and starts nothing, so the
             // feature can be ruled in or out without a rebuild.
+            //
+            // Nothing is started here: the thread only exists to drive an
+            // indicator in this window, so it waits until there is a window
+            // on screen to drive. See sync_gamma_listener().
             if std::env::var_os("WHITESCREEN_NO_GAMMA").is_none() {
-                self.imp().gamma_listener.replace(Some(GammaListener::new(move |e| {
-                    let _ = sender.send_blocking(e);
-                })));
+                self.imp().gamma_sender.replace(Some(sender));
             } else {
                 // Drop the sender so the receiver future above finishes
                 // instead of parking forever.
                 drop(sender);
             }
+
         }
 
         // ── "Choose Color" card ───────────────────────────────────────
@@ -1023,17 +868,22 @@ impl MainWindow {
             .spacing(14)
             .css_classes(["controls-card"])
             .build();
-        controls_card.append(
-            &gtk::Label::builder()
-                .label("Choose Color")
-                .css_classes(["section-title"])
-                .halign(gtk::Align::Start)
-                .build(),
-        );
-        controls_card.append(&preset_row);
+        controls_card.append(&self.build_target_row());
+        controls_card.append(&palette);
+
+        // Hidden until it has something to say; see update_scope_hint().
+        let scope_hint = gtk::Label::builder()
+            .css_classes(["dim-label"])
+            .halign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        self.imp().scope_hint.replace(Some(scope_hint.clone()));
+        controls_card.append(&scope_hint);
+        controls_card.append(&self.build_output_row());
         controls_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         controls_card.append(&action_bar);
-        controls_card.append(&cycle_row);
+        controls_card.append(&fill_bar);
+        controls_card.append(&cycle);
 
         // ── Content layout (right pane) ───────────────────────────────
         let main_box = gtk::Box::builder()
@@ -1056,13 +906,13 @@ impl MainWindow {
         let split_view = adw::NavigationSplitView::builder()
             .sidebar(
                 &adw::NavigationPage::builder()
-                    .title("Monitors")
+                    .title(gettext("Monitors"))
                     .child(&sidebar)
                     .build()
             )
             .content(
                 &adw::NavigationPage::builder()
-                    .title("Preview")
+                    .title(gettext("Preview"))
                     .child(&content)
                     .build()
             )
@@ -1082,7 +932,7 @@ impl MainWindow {
         if !crate::layer_shell_available() {
             toolbar_view.add_top_bar(
                 &adw::Banner::builder()
-                    .title("No wlr-layer-shell: overlays are fullscreen windows, and Identify is unavailable")
+                    .title(gettext("No wlr-layer-shell: overlays are fullscreen windows, and Identify is unavailable"))
                     .revealed(true)
                     .build(),
             );
@@ -1099,13 +949,6 @@ impl MainWindow {
             #[weak(rename_to = win)] self,
             move |_, _, _, _| win.schedule_sync()
         ));
-
-        // Restore the monitor selection before the first reconcile, so the
-        // rows are built already ticked instead of flickering into place.
-        let saved_monitors = self.imp().settings.monitors();
-        if !saved_monitors.is_empty() {
-            self.imp().selected.replace(saved_monitors.into_iter().collect());
-        }
 
         // Initial population.
         self.sync_monitors();
@@ -1141,6 +984,223 @@ impl MainWindow {
         ));
     }
 
+    /// The card's heading, and what it is aimed at.
+    ///
+    /// Without this the card was a set of colour chips floating beside a list
+    /// of monitors, with nothing anywhere saying which of them a chip would
+    /// change -- and no way to aim it at one except hunting for the swatch in
+    /// the sidebar.
+    fn build_target_row(&self) -> gtk::Box {
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(10)
+            .build();
+        row.append(
+            &gtk::Label::builder()
+                .label(gettext("Choose Color"))
+                .css_classes(["section-title"])
+                .halign(gtk::Align::Start)
+                .hexpand(true)
+                .build(),
+        );
+        // The label and the dropdown travel together; see `target_aim`.
+        //
+        // Hidden until rebuild_target_row() has seen the monitors: visible
+        // by default would mean an empty "Applies to" on screen for as long
+        // as it took to be corrected.
+        let aim = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(10)
+            .visible(false)
+            .build();
+        aim.append(
+            &gtk::Label::builder()
+                .label(gettext("Applies to"))
+                .css_classes(["dim-label"])
+                .valign(gtk::Align::Center)
+                .build(),
+        );
+
+        let drop = gtk::DropDown::from_strings(&[]);
+        drop.set_tooltip_text(Some(&gettext(
+            "Which monitor the colors below change. Pick one to give it a color of its own, leaving the others alone.",
+        )));
+        drop.update_property(&[gtk::accessible::Property::Label(
+            "Which monitor the colors apply to",
+        )]);
+        drop.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |drop| {
+                // Moved by the window rather than by the user; see
+                // set_target() and rebuild_target_row().
+                if win.imp().syncing.get() {
+                    return;
+                }
+                let key = win
+                    .imp()
+                    .target_keys
+                    .borrow()
+                    .get(drop.selected() as usize)
+                    .cloned()
+                    .flatten();
+                win.set_target(key);
+            }
+        ));
+        self.imp().target_drop.replace(Some(drop.clone()));
+        aim.append(&drop);
+        self.imp().target_aim.replace(Some(aim.clone()));
+        row.append(&aim);
+
+        row
+    }
+
+    /// Rebuild "Applies to" from the monitors now attached, keeping the aim
+    /// where it was if that monitor is still there.
+    fn rebuild_target_row(&self) {
+        let imp = self.imp();
+        let Some(drop) = imp.target_drop.borrow().clone() else { return };
+
+        let keys: Vec<Option<String>> = std::iter::once(None)
+            .chain(imp.entries.borrow().iter().map(|e| Some(e.key.clone())))
+            .collect();
+        let labels: Vec<String> = keys
+            .iter()
+            .map(|k| k.clone().unwrap_or_else(|| gettext("All monitors")))
+            .collect();
+
+        // A monitor that has been unplugged cannot stay the target: the card
+        // would be editing a screen that is not there.
+        let wanted = self.target().filter(|k| keys.iter().any(|c| c.as_ref() == Some(k)));
+        if wanted != self.target() {
+            imp.target.replace(wanted.clone());
+            // The row that was ringed has gone; nothing should be ringed in
+            // its place.
+            if let Some(list) = self.monitor_list() {
+                list.set_target(wanted.as_deref());
+            }
+        }
+        let selected = keys.iter().position(|k| *k == wanted).unwrap_or(0) as u32;
+
+        imp.target_keys.replace(keys);
+        // Setting the model moves the selection, which would report an aim
+        // nobody took.
+        imp.syncing.set(true);
+        drop.set_model(Some(&gtk::StringList::new(
+            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+        )));
+        drop.set_selected(selected);
+        imp.syncing.set(false);
+
+        // One monitor means nothing to choose between, and a row that can
+        // only say "All monitors" is a row in the way.
+        let several = imp.entries.borrow().len() > 1;
+        if let Some(aim) = imp.target_aim.borrow().as_ref() {
+            aim.set_visible(several);
+        }
+        self.sync_card();
+    }
+
+    /// Spell out what "All monitors" leaves out.
+    fn update_scope_hint(&self) {
+        let imp = self.imp();
+        let Some(hint) = imp.scope_hint.borrow().clone() else { return };
+        let Some(list) = self.monitor_list() else { return };
+
+        // Only worth saying when the card is aimed at everything: aimed at
+        // one monitor, the dropdown has already said so.
+        let own: Vec<String> = if self.target().is_some() || !list.per_monitor() {
+            Vec::new()
+        } else {
+            imp.entries
+                .borrow()
+                .iter()
+                .filter(|e| list.color_for(&e.key).is_some())
+                .map(|e| e.key.clone())
+                .collect()
+        };
+
+        hint.set_visible(!own.is_empty());
+        if !own.is_empty() {
+            let template = i18n::ngettext(
+                "{0} keeps a color of its own",
+                "{0} keep colors of their own",
+                own.len() as u32,
+            );
+            hint.set_text(&i18n::format(&template, &[&own.join(", ")]));
+        }
+    }
+
+    /// Brightness, and how long the colour stays up.
+    ///
+    /// Both are about the light coming off the panel rather than its colour,
+    /// which is why they share a row below the chips instead of sitting with
+    /// the fill modes.
+    fn build_output_row(&self) -> gtk::Box {
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(10)
+            .halign(gtk::Align::Center)
+            .build();
+
+        row.append(
+            &gtk::Label::builder()
+                .label(gettext("Brightness"))
+                .css_classes(["dim-label"])
+                .build(),
+        );
+
+        let scale = gtk::Scale::with_range(
+            gtk::Orientation::Horizontal,
+            BRIGHTNESS_MIN,
+            BRIGHTNESS_MAX,
+            1.0,
+        );
+        scale.set_value(BRIGHTNESS_MAX);
+        scale.set_width_request(170);
+        scale.set_draw_value(true);
+        scale.set_value_pos(gtk::PositionType::Right);
+        scale.set_tooltip_text(Some(&gettext(
+            "Scale the chosen color on its way to the screens, for a panel being used as a light",
+        )));
+        scale.update_property(&[gtk::accessible::Property::Label(&gettext("Brightness, percent"))]);
+        // The default value label is "85" with no unit, which beside a colour
+        // reads as anything at all.
+        scale.set_format_value_func(|_, value| i18n::format(&gettext("{0}%"), &[&format!("{value:.0}")]));
+        scale.connect_value_changed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |s| win.apply_brightness(s.value() / 100.0)
+        ));
+        self.imp().brightness_scale.replace(Some(scale.clone()));
+        row.append(&scale);
+
+        row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        row.append(
+            &gtk::Label::builder()
+                .label(gettext("Hide after"))
+                .css_classes(["dim-label"])
+                .build(),
+        );
+
+        let spin = gtk::SpinButton::with_range(0.0, AUTO_HIDE_MAX, 1.0);
+        spin.set_digits(0);
+        spin.set_value(0.0);
+        spin.set_tooltip_text(Some(&gettext(
+            "Take the overlays down after this many minutes. Zero leaves them up until something else takes them down.",
+        )));
+        spin.update_property(&[gtk::accessible::Property::Label(
+            "Hide the overlays after this many minutes, zero for never",
+        )]);
+        spin.connect_value_changed(glib::clone!(
+            #[weak(rename_to = win)] self,
+            move |s| win.apply_auto_hide(s.value() as u32)
+        ));
+        self.imp().auto_hide_spin.replace(Some(spin.clone()));
+        row.append(&spin);
+        row.append(&gtk::Label::builder().label("min").css_classes(["dim-label"]).build());
+
+        row
+    }
+
     /// Give everything back before the process ends.
     ///
     /// Idempotent, and safe to call from any exit route.
@@ -1171,56 +1231,412 @@ impl MainWindow {
         // the other side of a socket, and giving it back is cheaper than
         // trusting every session manager to notice a client that vanished
         // still holding one.
-        self.stop_cycle_timer();
+        if let Some(cycle) = self.cycle() {
+            cycle.stop_timer();
+        }
+        self.cancel_auto_hide();
         self.release_idle();
 
         // Stop the gamma prober thread deterministically rather than leaving
         // it to process exit.
         #[cfg(feature = "gamma")]
         self.imp().gamma_listener.replace(None);
+
+        // Written directly rather than queued: the main loop is on its way
+        // out, and an idle callback would never run.
+        self.save_settings();
+    }
+
+    // ── Driving the window from outside ──────────────────────────────────
+
+    /// Put a colour on screen as though a chip had been clicked.
+    ///
+    /// Marking the matching chip is `sync_card()`'s job, which `apply_color`
+    /// reaches: doing it here as well would briefly mark the shared colour
+    /// on a card that is aimed at a single monitor.
+    pub fn set_color(&self, rgba: gdk::RGBA) {
+        self.apply_color(rgba);
+    }
+
+    /// Switch per-monitor colours off, or back on, as the sidebar's tick box
+    /// does. Off keeps the colours: they are there again the moment it goes
+    /// back on, which is the promise the tick box makes too.
+    pub fn set_per_monitor_colors(&self, on: bool) {
+        if let Some(list) = self.monitor_list() {
+            list.set_per_monitor(on);
+        }
+    }
+
+    /// Give named monitors colours of their own, for `--monitor-color`, and
+    /// report the patterns that matched nothing.
+    ///
+    /// Selecting a monitor and colouring it are deliberately separate, here
+    /// as in the sidebar: setting a row's colour does not tick it either.
+    pub fn set_monitor_colors(&self, colors: &[(String, gdk::RGBA)]) -> Vec<String> {
+        let Some(list) = self.monitor_list() else { return Vec::new() };
+        colors
+            .iter()
+            .filter(|(pattern, rgba)| !list.set_color_matching(pattern, *rgba))
+            .map(|(pattern, _)| pattern.clone())
+            .collect()
+    }
+
+    /// Run without showing the control window, for `whitescreen --show` and
+    /// friends.
+    ///
+    /// The window is still built: it owns the overlays, the monitor list and
+    /// the hot-plug reconcile, and none of that works without it. What
+    /// changes is that it is never presented, and that hiding the overlays
+    /// ends the process rather than revealing a window nobody asked for.
+    pub fn set_headless(&self, headless: bool) {
+        self.imp().headless.set(headless);
+        #[cfg(feature = "gamma")]
+        self.sync_gamma_listener();
+    }
+
+    /// Start the gamma prober while this window is on screen, and stop it
+    /// while it is not.
+    ///
+    /// The prober polls the compositor once or twice a second for the life of
+    /// the process, and the only thing it feeds is the indicator in the status
+    /// bar. A scripted `whitescreen --color red --all --show` never shows that
+    /// bar, so it has no reason to be probing at all.
+    #[cfg(feature = "gamma")]
+    fn sync_gamma_listener(&self) {
+        let imp = self.imp();
+        // WHITESCREEN_NO_GAMMA drops the sender in build_ui, so a missing one
+        // means "never start this".
+        let Some(sender) = imp.gamma_sender.borrow().clone() else { return };
+
+        if imp.headless.get() {
+            // Dropping the listener joins its thread; see GammaListener::drop.
+            imp.gamma_listener.replace(None);
+            return;
+        }
+        if imp.gamma_listener.borrow().is_some() {
+            return;
+        }
+        imp.gamma_listener.replace(Some(GammaListener::new(move |e| {
+            let _ = sender.send_blocking(e);
+        })));
+    }
+
+    /// Whether a colour is on the screens right now.
+    pub fn overlays_visible(&self) -> bool {
+        self.imp().overlays_shown.get()
+    }
+
+    /// Tick the monitors named by these shell-style patterns, and report the
+    /// patterns that matched nothing.
+    pub fn select_monitors(&self, patterns: &[String]) -> Vec<String> {
+        match self.monitor_list() {
+            Some(list) => list.select_matching(patterns),
+            None       => Vec::new(),
+        }
+    }
+
+    /// Names of the monitors currently attached.
+    pub fn attached_monitors(&self) -> Vec<String> {
+        self.monitor_list().map(|l| l.attached()).unwrap_or_default()
+    }
+
+    pub fn select_all_monitors(&self) {
+        if let Some(list) = self.monitor_list() {
+            list.select_all_attached();
+        }
+    }
+
+    pub fn set_cycle_armed(&self, armed: bool) {
+        if let Some(cycle) = self.cycle() {
+            cycle.set_armed(armed);
+        }
+    }
+
+    pub fn set_cycle_interval(&self, secs: f64) {
+        if let Some(cycle) = self.cycle() {
+            cycle.set_interval(secs);
+        }
+    }
+
+    /// Replace the cycle queue, for `--queue`.
+    pub fn set_queue(&self, colors: &[gdk::RGBA]) {
+        if let Some(cycle) = self.cycle() {
+            cycle.set_queue_colors(colors);
+        }
+    }
+
+    /// Which pattern covers the screens, for `--pattern` and `--exerciser`.
+    pub fn set_pattern(&self, mode: FillMode) {
+        if let Some(bar) = self.imp().fill_bar.borrow().as_ref() {
+            bar.set_mode(mode);
+        }
+    }
+
+    /// Cover half the screen, for `--region`. Implies the region mode: a side
+    /// on its own would be a setting with nothing to apply it to.
+    pub fn set_region(&self, side: color_surface::Side) {
+        if let Some(bar) = self.imp().fill_bar.borrow().as_ref() {
+            bar.set_side(side);
+            bar.set_mode(FillMode::Region);
+        }
+    }
+
+    /// Fill the other half as well, for `--second-color`.
+    pub fn set_second_color(&self, rgba: Option<gdk::RGBA>) {
+        if let Some(bar) = self.imp().fill_bar.borrow().as_ref() {
+            bar.set_second_color(rgba);
+        }
+    }
+
+    /// Brightness as a fraction, for the settings file.
+    pub fn brightness(&self) -> f64 {
+        self.imp().brightness.get()
+    }
+
+    /// Set the brightness from outside. Goes through the slider so it shows
+    /// the value rather than contradicting it, and is clamped to the range
+    /// the slider offers so a command line cannot ask for a black screen.
+    pub fn set_brightness(&self, fraction: f64) {
+        let percent = (fraction * 100.0).clamp(BRIGHTNESS_MIN, BRIGHTNESS_MAX);
+        match self.imp().brightness_scale.borrow().as_ref() {
+            Some(scale) => scale.set_value(percent),
+            // No slider yet: still honour the request.
+            None => self.apply_brightness(percent / 100.0),
+        }
+    }
+
+    fn apply_brightness(&self, fraction: f64) {
+        let imp = self.imp();
+        if imp.brightness.replace(fraction) == fraction {
+            return;
+        }
+        // The chosen colours have not changed; only what reaches a screen
+        // has, and everything on its way there goes through scaled().
+        self.refresh_colors();
+        self.queue_save();
+    }
+
+    /// The chosen colour as it should actually reach a panel.
+    ///
+    /// Scaling the three channels together moves the level without moving the
+    /// hue, which is what a brightness control has to do: dimming by blending
+    /// towards black is the same operation, and this way round it needs no
+    /// second colour.
+    fn scaled(&self, rgba: gdk::RGBA) -> gdk::RGBA {
+        let k = self.imp().brightness.get() as f32;
+        if k >= 1.0 {
+            return rgba;
+        }
+        gdk::RGBA::new(rgba.red() * k, rgba.green() * k, rgba.blue() * k, rgba.alpha())
+    }
+
+    /// Minutes before the overlays take themselves down, 0 for never.
+    pub fn auto_hide(&self) -> u32 {
+        self.imp().auto_hide.get()
+    }
+
+    /// Set the auto-hide delay from outside, through the spinner so it shows
+    /// the value.
+    pub fn set_auto_hide(&self, minutes: u32) {
+        match self.imp().auto_hide_spin.borrow().as_ref() {
+            Some(spin) => spin.set_value(f64::from(minutes).min(AUTO_HIDE_MAX)),
+            None => self.apply_auto_hide(minutes),
+        }
+    }
+
+    fn apply_auto_hide(&self, minutes: u32) {
+        let imp = self.imp();
+        if imp.auto_hide.replace(minutes) == minutes {
+            return;
+        }
+        // Changing the delay restarts the countdown, rather than leaving a
+        // timer running against the number that was there before.
+        self.cancel_auto_hide();
+        if imp.overlays_shown.get() {
+            self.arm_auto_hide();
+        }
+        self.queue_save();
+    }
+
+    /// Start the countdown, if there is one to start and it is not already
+    /// running.
+    ///
+    /// Idempotent on purpose: `show_selected()` runs again on every hot-plug,
+    /// and re-arming there would hand a plugged-in monitor the power to reset
+    /// a countdown that is most of the way through.
+    fn arm_auto_hide(&self) {
+        let imp = self.imp();
+        let minutes = imp.auto_hide.get();
+        if minutes == 0 || imp.auto_hide_source.borrow().is_some() {
+            return;
+        }
+
+        let id = glib::timeout_add_seconds_local_once(
+            minutes.saturating_mul(60),
+            glib::clone!(
+                #[weak(rename_to = win)] self,
+                move || {
+                    // The source has fired, so it must not be removed again.
+                    win.imp().auto_hide_source.replace(None);
+                    win.hide_all_overlays();
+                }
+            ),
+        );
+        imp.auto_hide_source.replace(Some(id));
+    }
+
+    fn cancel_auto_hide(&self) {
+        if let Some(id) = self.imp().auto_hide_source.replace(None) {
+            id.remove();
+        }
     }
 
     // ── Colour ───────────────────────────────────────────────────────────
+    //
+    // Three jobs, which used to be one method. Keeping them apart is what
+    // lets the card be aimed at a single monitor: writing a per-monitor
+    // colour makes the sidebar announce a change, and with one method that
+    // announcement came back in as "the user chose a colour" and would have
+    // been written straight back out again.
+    //
+    //   choose_color()    the card was used; where it lands depends on what
+    //                     the card is aimed at
+    //   apply_color()     the shared colour -- what every monitor without one
+    //                     of its own shows
+    //   refresh_colors()  push whatever is now true out to the screens
+    //   sync_card()       make the card show what it is editing
 
-    /// Apply `rgba` to the preview and every overlay, and remember it so
-    /// overlays created by a later hot-plug start out matching.
+    /// Which monitor the Choose Color card is aimed at; `None` is all of
+    /// them, through the shared colour.
+    pub fn target(&self) -> Option<String> {
+        self.imp().target.borrow().clone()
+    }
+
+    /// Aim the card.
+    ///
+    /// Changes no colour -- it only decides where the next one goes -- but
+    /// both views of the aim have to follow it, whichever of them moved it:
+    /// the dropdown in the card and the ring on the monitor's row.
+    pub fn set_target(&self, key: Option<String>) {
+        let imp = self.imp();
+        if *imp.target.borrow() == key {
+            return;
+        }
+        imp.target.replace(key.clone());
+
+        // Driving the widgets makes them report a change; the guard is what
+        // stops that coming back round as a fresh aim.
+        let was = imp.syncing.replace(true);
+        if let Some(list) = self.monitor_list() {
+            list.set_target(key.as_deref());
+        }
+        if let Some(drop) = imp.target_drop.borrow().as_ref()
+            && let Some(index) = imp.target_keys.borrow().iter().position(|k| *k == key)
+        {
+            drop.set_selected(index as u32);
+        }
+        imp.syncing.set(was);
+
+        self.sync_card();
+    }
+
+    /// The colour the card is editing: the aimed-at monitor's own colour if
+    /// it has one, the shared colour otherwise.
+    fn card_color(&self) -> gdk::RGBA {
+        let shared = self.imp().color.get();
+        match (self.target(), self.monitor_list()) {
+            (Some(key), Some(list)) => list.color_for(&key).unwrap_or(shared),
+            _ => shared,
+        }
+    }
+
+    /// A colour was chosen in the card -- a chip, a temperature, the picker,
+    /// a queue swatch.
+    fn choose_color(&self, rgba: gdk::RGBA) {
+        let Some(key) = self.target() else {
+            self.apply_color(rgba);
+            return;
+        };
+        // Aimed at one monitor: give that monitor the colour and leave the
+        // shared one alone. set_color_for() switches per-monitor colours on
+        // and announces the change, which refreshes the screens.
+        if let Some(list) = self.monitor_list() {
+            list.set_color_for(&key, rgba);
+        }
+        self.sync_card();
+        self.queue_save();
+    }
+
+    /// Set the shared colour: what every monitor without one of its own
+    /// shows. The cycle, the command line and the settings file all drive
+    /// this one, never a single monitor's colour.
     pub fn apply_color(&self, rgba: gdk::RGBA) {
         let imp = self.imp();
         imp.color.set(rgba);
 
-        let preview = imp.preview.borrow().clone();
-        if let Some(p) = preview {
-            p.set_rgba(rgba);
+        // Saving every step of a running queue would rewrite the file every
+        // interval for a colour nobody chose. save_settings() stores the
+        // colour the queue took over from instead.
+        if !self.cycle().is_some_and(|c| c.is_playing()) {
+            self.queue_save();
         }
-        for ov in self.overlays() {
-            ov.set_color(rgba);
-        }
+        self.refresh_colors();
     }
 
-    /// Record which colour chip is selected, for the next launch.
-    ///
-    /// Does nothing while cycling: the timer drives the same chips the user
-    /// clicks, so recording every step would overwrite the chip that was
-    /// actually chosen -- and rewrite the file once per tick.
-    fn remember_chip(&self, name: &str) {
+    /// Push the colours that are now true out to the sidebar and the screens.
+    fn refresh_colors(&self) {
+        let shared = self.imp().color.get();
+        let list = self.monitor_list();
+
+        // The rows that are following the shared colour follow it here, so
+        // the sidebar and the card never disagree about what a screen shows.
+        if let Some(list) = list.as_ref() {
+            list.set_shared_color(shared);
+        }
+        // A monitor with a colour of its own keeps it; the rest follow the
+        // shared one. Brightness applies to both.
+        for entry in self.imp().entries.borrow().iter() {
+            let own = list.as_ref().and_then(|l| l.color_for(&entry.key));
+            entry.overlay.set_color(self.scaled(own.unwrap_or(shared)));
+        }
+        self.sync_card();
+    }
+
+    /// Make the card show the colour it is editing: the preview, the marked
+    /// chip, and the colour the queue would append.
+    fn sync_card(&self) {
         let imp = self.imp();
-        if imp.cycling.get() {
+        // palette.select() moves a chip, which reports a colour chosen,
+        // which lands back here. The guard is what stops that going round.
+        if imp.syncing.replace(true) {
             return;
         }
-        imp.settings.set_chip(name);
-        imp.settings.save();
-    }
 
-    /// Persist the ticked monitors.
-    ///
-    /// Sorted because the selection is a `HashSet`: without it the file would
-    /// come out in a different order on every save, for no change at all.
-    fn save_monitor_selection(&self) {
-        let imp = self.imp();
-        let mut keys: Vec<String> = imp.selected.borrow().iter().cloned().collect();
-        keys.sort();
-        imp.settings.set_monitors(&keys);
-        imp.settings.save();
+        let editing = self.card_color();
+        if let Some(cycle) = self.cycle() {
+            cycle.set_current_color(editing);
+        }
+        if let Some(palette) = self.palette() {
+            // Not while the timer owns the chips; on_cycling_changed() has
+            // greyed them out and cleared them on purpose.
+            if !self.cycle().is_some_and(|c| c.is_playing()) {
+                palette.select(editing);
+            }
+        }
+        // The preview shows what a screen will, brightness included, so it
+        // is also what the label has to name.
+        let shown = self.scaled(editing);
+        let preview = imp.preview.borrow().clone();
+        if let Some(p) = preview {
+            p.set_rgba(shown);
+            p.update_property(&[gtk::accessible::Property::Label(&i18n::format(
+                &gettext("Color preview, {0}"),
+                &[&color::hex(shown)],
+            ))]);
+        }
+
+        self.update_scope_hint();
+        imp.syncing.set(false);
     }
 
     // Snapshot helpers. Every method below calls into GTK while walking the
@@ -1257,15 +1673,14 @@ impl MainWindow {
     pub fn show_selected(&self) {
         let imp = self.imp();
 
-        let targets: Vec<(ScreenOverlay, gdk::Monitor)> = {
-            let entries  = imp.entries.borrow();
-            let selected = imp.selected.borrow();
-            entries
-                .iter()
-                .filter(|e| selected.contains(&e.key) && e.monitor.is_valid())
-                .map(|e| (e.overlay.clone(), e.monitor.clone()))
-                .collect()
-        };
+        let Some(list) = self.monitor_list() else { return };
+        let targets: Vec<(ScreenOverlay, gdk::Monitor)> = imp
+            .entries
+            .borrow()
+            .iter()
+            .filter(|e| list.is_selected(&e.key) && e.monitor.is_valid())
+            .map(|e| (e.overlay.clone(), e.monitor.clone()))
+            .collect();
 
         // Nothing attached to show on. Leave `overlays_shown` alone: if the
         // last selected monitor was just unplugged the overlays are still
@@ -1273,14 +1688,25 @@ impl MainWindow {
         //
         // The inhibitor cannot stay, though. Nothing is on any screen to
         // justify it, and on the session-manager route it would otherwise
-        // keep the machine awake until the app quit.
+        // keep the machine awake until the app quit. Nor can the countdown:
+        // it would take down overlays that are already down and, when
+        // headless, end the process over a monitor that was merely unplugged.
         if targets.is_empty() {
             self.release_idle();
+            self.cancel_auto_hide();
+            // Nothing on screen to play onto either.
+            if let Some(cycle) = self.cycle() {
+                cycle.set_playing(false);
+            }
             return;
         }
         imp.overlays_shown.set(true);
 
+        // Whether the notice on each overlay should name the stepping keys.
+        let steppable = self.cycle().is_some_and(|c| c.can_step());
+
         for (overlay, monitor) in targets {
+            overlay.set_cycle_hint(steppable);
             overlay.show_on_monitor(Some(&monitor));
         }
         // Overlays and badges share Layer::Overlay, where the compositor
@@ -1289,6 +1715,14 @@ impl MainWindow {
         if imp.identify.get() {
             self.present_labels();
         }
+
+        // There is something to play onto now. Harmless on the hot-plug path,
+        // which comes back through here with the queue already running.
+        if let Some(cycle) = self.cycle() {
+            cycle.set_playing(true);
+        }
+
+        self.arm_auto_hide();
 
         // Keep the screen awake for as long as the colour is up: a lighting
         // or camera setup is a screen nobody touches for minutes, which is
@@ -1352,10 +1786,10 @@ impl MainWindow {
         let imp = self.imp();
         imp.idle_window.replace(None);
         let cookie = imp.idle_cookie.replace(0);
-        if cookie != 0 {
-            if let Some(app) = self.application() {
-                app.uninhibit(cookie);
-            }
+        if cookie != 0
+            && let Some(app) = self.application()
+        {
+            app.uninhibit(cookie);
         }
     }
 
@@ -1363,15 +1797,36 @@ impl MainWindow {
     /// so one ESC press on any screen clears all of them.
     pub fn hide_all_overlays(&self) {
         self.imp().overlays_shown.set(false);
+        self.cancel_auto_hide();
+        // Before hiding, so the colour the queue took over from is the one
+        // left behind rather than whichever step it stopped on.
+        if let Some(cycle) = self.cycle() {
+            cycle.set_playing(false);
+        }
         self.release_idle();
         for ov in self.overlays() {
             ov.hide_overlay();
+        }
+
+        // Nothing left to look at. A window that was never shown has nothing
+        // to fall back to, so the process ends here rather than lingering
+        // invisibly after a scripted --show.
+        if self.imp().headless.get()
+            && let Some(app) = self.application()
+        {
+            app.quit();
         }
     }
 
     /// Toggle the per-monitor connector-name badges.
     pub fn set_identify(&self, on: bool) {
         self.imp().identify.set(on);
+        // Keep the button honest when this came from the command line. A
+        // no-op when it came *from* the button, which is what stops the two
+        // from calling each other.
+        if let Some(btn) = self.imp().ident_btn.borrow().as_ref() {
+            btn.set_active(on);
+        }
         if on {
             self.present_labels();
         } else {
@@ -1387,91 +1842,68 @@ impl MainWindow {
         }
     }
 
-    // ── Cycle mode ───────────────────────────────────────────────────────
+    fn palette(&self) -> Option<Palette> {
+        self.imp().palette.borrow().clone()
+    }
 
-    /// Start or stop stepping through the presets on a timer.
-    pub fn set_cycling(&self, on: bool) {
-        let imp = self.imp();
-        if imp.cycling.get() == on {
-            return;
+    /// The colour one monitor should show: its own if it has been given one,
+    /// otherwise the shared one.
+    fn color_for(&self, key: &str, shared: gdk::RGBA) -> gdk::RGBA {
+        self.monitor_list()
+            .and_then(|list| list.color_for(key))
+            .unwrap_or(shared)
+    }
+
+    /// What should cover a screen right now.
+    fn fill(&self) -> Fill {
+        self.imp().fill_bar.borrow().as_ref().map(FillBar::fill).unwrap_or_default()
+    }
+
+    /// Push the current fill to the preview and every overlay.
+    fn apply_fill(&self) {
+        let fill = self.fill();
+        if let Some(preview) = self.imp().preview.borrow().as_ref() {
+            preview.set_fill(fill);
         }
+        for overlay in self.overlays() {
+            overlay.set_fill(fill);
+        }
+    }
 
-        if !on {
-            // Clear the flag first so restoring the chip is recorded as the
-            // user's choice rather than swallowed by remember_chip().
-            imp.cycling.set(false);
-            self.stop_cycle_timer();
-            if let Some(btn) = imp.pre_cycle.replace(None) {
-                btn.set_active(true);
+    fn cycle(&self) -> Option<CycleBar> {
+        self.imp().cycle.borrow().clone()
+    }
+
+    fn monitor_list(&self) -> Option<MonitorList> {
+        self.imp().monitors.borrow().clone()
+    }
+
+    /// The queue took the colour over, or gave it back.
+    ///
+    /// Handing it over means clearing the chips and greying them: while the
+    /// timer owns the colour, a chip that still looked clickable would be
+    /// lying about it. Taking it back restores the colour that was showing
+    /// when play started -- through `select()` rather than a remembered chip,
+    /// which also covers the case where no chip was marked.
+    fn on_cycling_changed(&self, playing: bool) {
+        let imp = self.imp();
+
+        if playing {
+            imp.pre_cycle_color.set(imp.color.get());
+            if let Some(palette) = self.palette() {
+                palette.clear();
+                palette.set_sensitive(false);
             }
             return;
         }
 
-        let presets = imp.presets.borrow().clone();
-        if presets.is_empty() {
-            return;
+        let restored = imp.pre_cycle_color.get();
+        if let Some(palette) = self.palette() {
+            // Only handing the chips back to the user; marking the one that
+            // holds the restored colour is sync_card()'s job.
+            palette.set_sensitive(true);
         }
-        // Come back to whatever is showing now when the mode is switched off,
-        // and start stepping from there so the first tick is a visible change.
-        let active = presets.iter().position(|b| b.is_active());
-        let pre = match active {
-            Some(i) => Some(presets[i].clone()),
-            None    => imp.custom_btn.borrow().clone().filter(|b| b.is_active()),
-        };
-        imp.pre_cycle.replace(pre);
-        imp.cycle_index.set(active.unwrap_or(0));
-        imp.cycling.set(true);
-        self.start_cycle_timer();
-    }
-
-    fn start_cycle_timer(&self) {
-        self.stop_cycle_timer();
-        let id = glib::timeout_add_local(
-            std::time::Duration::from_secs_f64(self.imp().cycle_secs.get()),
-            glib::clone!(
-                #[weak(rename_to = win)] self,
-                #[upgrade_or] glib::ControlFlow::Break,
-                move || {
-                    win.cycle_step();
-                    glib::ControlFlow::Continue
-                }
-            ),
-        );
-        self.imp().cycle_source.replace(Some(id));
-    }
-
-    /// Remove the cycle timer if one is running. Safe to call when none is.
-    pub fn stop_cycle_timer(&self) {
-        if let Some(id) = self.imp().cycle_source.replace(None) {
-            id.remove();
-        }
-    }
-
-    fn cycle_step(&self) {
-        let presets = self.imp().presets.borrow().clone();
-        if presets.is_empty() {
-            return;
-        }
-        let next = (self.imp().cycle_index.get() + 1) % presets.len();
-        self.imp().cycle_index.set(next);
-        // Activating the chip rather than calling apply_color() directly
-        // keeps the window showing which colour is currently on the screens.
-        presets[next].set_active(true);
-    }
-
-    /// Change the seconds per step, restarting a running timer so the new
-    /// interval takes effect immediately rather than after the current step.
-    fn set_cycle_interval(&self, secs: f64) {
-        let imp = self.imp();
-        if imp.cycle_secs.get() == secs {
-            return;
-        }
-        imp.cycle_secs.set(secs);
-        imp.settings.set_cycle_interval(secs);
-        imp.settings.save();
-        if imp.cycling.get() {
-            self.start_cycle_timer();
-        }
+        self.apply_color(restored);
     }
 
     // ── Monitor tracking ─────────────────────────────────────────────────
@@ -1535,14 +1967,15 @@ impl MainWindow {
         let keys = monitor_keys(&current);
 
         let color = self.imp().color.get();
+        let fill  = self.fill();
         let mut old       = self.imp().entries.take();
         let mut graveyard = self.imp().graveyard.take();
         let mut next: Vec<MonitorEntry> = Vec::with_capacity(current.len());
         let mut rekeyed: Vec<(String, String)> = Vec::new();
 
         for (i, (mon, key)) in current.iter().zip(keys.iter()).enumerate() {
-            let title = monitor_title(mon, i);
-            let sub   = monitor_subtitle(mon);
+            let title = monitor_list::title(mon, i);
+            let sub   = monitor_list::subtitle(mon);
             let sub   = (!sub.is_empty()).then_some(sub);
 
             // Same GdkMonitor object, so this screen never went away: keep
@@ -1571,14 +2004,16 @@ impl MainWindow {
                 let mut e = graveyard.remove(pos);
                 e.monitor  = mon.clone();
                 e.handlers = self.track_monitor(mon);
-                e.overlay.set_color(color);
+                e.overlay.set_color(self.scaled(self.color_for(&e.key, color)));
+                e.overlay.set_fill(fill);
                 e.label.rebind(mon, &title, sub.as_deref());
                 next.push(e);
                 continue;
             }
 
             let overlay = ScreenOverlay::new(&app);
-            overlay.set_color(color);
+            overlay.set_color(self.scaled(self.color_for(key, color)));
+            overlay.set_fill(fill);
             let label = monitor_label::MonitorLabel::new(&app, mon, &title, sub.as_deref());
 
             next.push(MonitorEntry {
@@ -1605,41 +2040,19 @@ impl MainWindow {
         graveyard.extend(old);
         self.imp().graveyard.replace(graveyard);
 
-        let rekeyed_any = !rekeyed.is_empty();
-        {
-            let mut sel = self.imp().selected.borrow_mut();
+        // Selections for absent monitors are kept on purpose: unplug a screen
+        // and plug it back in and the choice is still there. Carrying a
+        // rekeyed one across is the same promise for a key that changed
+        // shape rather than a monitor that went away.
+        if let Some(list) = self.monitor_list() {
             for (from, to) in rekeyed {
-                if sel.remove(&from) {
-                    sel.insert(to);
-                }
-            }
-            // Selections for absent monitors are kept on purpose: unplug a
-            // screen and plug it back in and the choice is still there.
-            // Only a genuinely empty selection (first run, or the display
-            // was empty at startup) picks a monitor on its own -- past that
-            // point, "nothing selected" is the user's decision to keep.
-            //
-            // The restored selection gets one extra chance: a settings file
-            // carried to a machine with different monitors names nothing that
-            // is plugged in, and leaving every row unticked on startup would
-            // look like the app had failed to find the screens.
-            let none_attached = !next.iter().any(|e| sel.contains(&e.key));
-            if sel.is_empty() || (self.imp().first_sync.get() && none_attached) {
-                if let Some(first) = next.first() {
-                    sel.insert(first.key.clone());
-                }
+                list.rekey(&from, &to);
             }
         }
 
+        let rows: Vec<(String, gdk::Monitor)> =
+            next.iter().map(|e| (e.key.clone(), e.monitor.clone())).collect();
         self.imp().entries.replace(next);
-        self.imp().first_sync.set(false);
-
-        // A key that changed shape (a connector name reported late, or a
-        // duplicate suffix shifting when its twin was unplugged) has to reach
-        // the settings file too, or the next launch restores the old one.
-        if rekeyed_any {
-            self.save_monitor_selection();
-        }
 
         // A monitor that arrives while the overlays are up gets covered
         // too, and one that comes back goes under the colour it left under.
@@ -1650,153 +2063,12 @@ impl MainWindow {
             self.present_labels();
         }
 
-        self.rebuild_monitor_rows();
-    }
-
-    /// Rebuild the sidebar rows from `entries`.
-    fn rebuild_monitor_rows(&self) {
-        let imp = self.imp();
-        // Cloned out of the RefCell so the borrow ends before the row
-        // handlers (which touch imp) can run.
-        let rows_box = match imp.mon_box.borrow().as_ref() {
-            Some(b) => b.clone(),
-            None    => return,
-        };
-
-        while let Some(child) = rows_box.first_child() {
-            rows_box.remove(&child);
+        if let Some(list) = self.monitor_list() {
+            list.set_monitors(&rows);
         }
-
-        // Snapshot for the same re-entrancy reason as above; the row only
-        // ever needs the monitor.
-        let monitors: Vec<(String, gdk::Monitor)> =
-            imp.entries.borrow().iter().map(|e| (e.key.clone(), e.monitor.clone())).collect();
-
-        if monitors.is_empty() {
-            // Zero monitors is a transient state during a hot-plug, not a
-            // fatal error as it used to be treated in main.rs.
-            rows_box.append(
-                &gtk::Label::builder()
-                    .label("No monitors detected")
-                    .css_classes(["dim-label"])
-                    .halign(gtk::Align::Start)
-                    .margin_top(12)
-                    .build(),
-            );
-        }
-
-        for (i, (key, mon)) in monitors.iter().enumerate() {
-            rows_box.append(&self.build_monitor_row(i, key, mon));
-        }
-
-        self.update_show_sensitivity();
-    }
-
-    fn build_monitor_row(&self, i: usize, key: &str, mon: &gdk::Monitor) -> gtk::CheckButton {
-        let geo = mon.geometry();
-        let key = key.to_string();
-
-        let icon = gtk::Image::builder()
-            .icon_name("video-display-symbolic")
-            .pixel_size(44)
-            .valign(gtk::Align::Center)
-            .build();
-
-        let title_lbl = gtk::Label::builder()
-            .label(monitor_title(mon, i))
-            .halign(gtk::Align::Start)
-            .css_classes(["heading"])
-            .build();
-        let res_lbl = gtk::Label::builder()
-            .label(format!("{} × {}", geo.width(), geo.height()))
-            .halign(gtk::Align::Start)
-            .css_classes(["dim-label"])
-            .build();
-
-        // refresh_rate() reports 0 when the compositor does not know it;
-        // the old code rendered that as a bogus "0.000 Hz".
-        let rate_text = match mon.refresh_rate() {
-            0 => format!("×{:.2}", mon.scale()),
-            r => format!("{}.{:03} Hz  •  ×{:.2}", r / 1000, r % 1000, mon.scale()),
-        };
-        let rate_lbl = gtk::Label::builder()
-            .label(rate_text)
-            .halign(gtk::Align::Start)
-            .css_classes(["dim-label"])
-            .build();
-
-        let text = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(1)
-            .hexpand(true)
-            .valign(gtk::Align::Center)
-            .build();
-        text.append(&title_lbl);
-        text.append(&res_lbl);
-        text.append(&rate_lbl);
-
-        let num_lbl = gtk::Label::builder()
-            .label((i + 1).to_string())
-            .css_classes(["monitor-number"])
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build();
-
-        // Right-hand check badge (styling driven purely by :checked).
-        let check_badge = gtk::Image::builder()
-            .icon_name("object-select-symbolic")
-            .pixel_size(12)
-            .css_classes(["mon-check-badge"])
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build();
-
-        let row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(12)
-            .margin_top(10).margin_bottom(10)
-            .margin_start(10).margin_end(12)
-            .build();
-        row.append(&num_lbl);
-        row.append(&icon);
-        row.append(&text);
-        row.append(&check_badge);
-
-        let check = gtk::CheckButton::builder()
-            .active(self.imp().selected.borrow().contains(&key))
-            .child(&row)
-            .hexpand(true)
-            .css_classes(["monitor-check"])
-            .build();
-
-        check.connect_toggled(glib::clone!(
-            #[weak(rename_to = win)] self,
-            #[strong] key,
-            move |btn| {
-                {
-                    let mut sel = win.imp().selected.borrow_mut();
-                    if btn.is_active() { sel.insert(key.clone()); } else { sel.remove(&key); }
-                }
-                win.save_monitor_selection();
-                win.update_show_sensitivity();
-            }
-        ));
-
-        check
-    }
-
-    fn update_show_sensitivity(&self) {
-        let imp = self.imp();
-        // Intersect, do not just count: selections for unplugged monitors
-        // are kept deliberately, and "Show" must not look clickable when
-        // none of the selected screens is currently attached.
-        let any = {
-            let sel = imp.selected.borrow();
-            imp.entries.borrow().iter().any(|e| sel.contains(&e.key))
-        };
-        if let Some(btn) = imp.show_btn.borrow().as_ref() {
-            btn.set_sensitive(any);
-        }
+        // After the list, so "Applies to" is rebuilt from the monitors the
+        // sidebar is now showing.
+        self.rebuild_target_row();
     }
 }
 

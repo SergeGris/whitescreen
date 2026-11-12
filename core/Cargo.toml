@@ -1,0 +1,12 @@
+[package]
+name         = "whitescreen-core"
+version      = "1.0.0"
+edition      = "2024"
+rust-version = "1.92"
+license      = "GPL-3.0-or-later"
+description  = "Toolkit-independent core of White Screen: colours, fill geometry, monitor name matching"
+
+# Deliberately no dependencies at all. Everything here has to be usable from
+# the GTK application and from a native Windows build, so it can depend on
+# neither toolkit.
+[dependencies]

@@ -1,12 +1,22 @@
-desktop_file = app_id + '.desktop'
-install_data(
-  desktop_file,
+# Both files are templates: msgfmt merges the translated Name, Comment and
+# summary in from the catalogues, which is why they are named `.in` and built
+# rather than installed as they are. With no translations yet the output is
+# the input, so nothing about an English install changes.
+desktop_file = i18n.merge_file(
+  input:       app_id + '.desktop.in',
+  output:      app_id + '.desktop',
+  type:        'desktop',
+  po_dir:      meson.project_source_root() / 'po',
+  install:     true,
   install_dir: datadir / 'applications',
 )
 
-metainfo_file = app_id + '.metainfo.xml'
-install_data(
-  metainfo_file,
+metainfo_file = i18n.merge_file(
+  input:       app_id + '.metainfo.xml.in',
+  output:      app_id + '.metainfo.xml',
+  type:        'xml',
+  po_dir:      meson.project_source_root() / 'po',
+  install:     true,
   install_dir: datadir / 'metainfo',
 )
 
@@ -31,12 +41,17 @@ install_data(
 )
 
 # ── Validation (skipped when the tools are absent) ───────────────────────────
+#
+# The *merged* files are what gets installed, so they are what is checked: a
+# translation that broke the desktop entry would sail past a check of the
+# template.
 desktop_file_validate = find_program('desktop-file-validate', required: false)
 if desktop_file_validate.found()
   test(
     'validate-desktop',
     desktop_file_validate,
-    args: [meson.current_source_dir() / desktop_file],
+    args: [desktop_file.full_path()],
+    depends: desktop_file,
     suite: 'data',
   )
 endif
@@ -46,7 +61,8 @@ if appstreamcli.found()
   test(
     'validate-metainfo',
     appstreamcli,
-    args: ['validate', '--no-net', '--explain', meson.current_source_dir() / metainfo_file],
+    args: ['validate', '--no-net', '--explain', metainfo_file.full_path()],
+    depends: metainfo_file,
     suite: 'data',
   )
 endif

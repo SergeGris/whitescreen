@@ -9,10 +9,12 @@ app_id = 'io.github.SergeGris.WhiteScreen'
 
 cargo = find_program('cargo', required: true)
 gnome = import('gnome')
+i18n  = import('i18n')
 
 prefix     = get_option('prefix')
 bindir     = prefix / get_option('bindir')
 datadir    = prefix / get_option('datadir')
+localedir  = prefix / get_option('localedir')
 
 # CARGO_HOME is deliberately NOT set here. build-aux/cargo.sh defaults it to
 # <builddir>/cargo-home when the environment does not provide one, which keeps
@@ -45,6 +47,9 @@ cargo_build = custom_target(
   console: true,
   install: true,
   install_dir: bindir,
+  # Where the binary looks for its translations. A plain `cargo build` has no
+  # build system to ask and falls back to /usr/share/locale; see src/i18n.rs.
+  env: {'WHITESCREEN_LOCALEDIR': localedir},
   command: [
     meson.project_source_root() / 'build-aux' / 'cargo.sh',
     meson.project_build_root(),
@@ -56,6 +61,9 @@ cargo_build = custom_target(
   ],
 )
 
+# po first: data/ merges the catalogues into the desktop entry and the
+# AppStream metadata.
+subdir('po')
 subdir('data')
 
 gnome.post_install(
@@ -67,6 +75,7 @@ summary({
   'prefix'      : prefix,
   'bindir'      : bindir,
   'datadir'     : datadir,
+  'localedir'   : localedir,
   'buildtype'   : get_option('buildtype'),
   'gamma'       : get_option('gamma'),
 }, section: 'Configuration')

@@ -34,11 +34,14 @@
       so you always know which physical panel you are looking at.
     </p>
     <p>
-      Cycle mode steps through white, black, red, green and blue on a timer, which
-      is what a dead-pixel check needs — a stuck subpixel only shows up on some of
-      them. The screen is kept awake while an overlay is up, so a display used as a
-      key light does not blank partway through, and the color, the monitors and the
-      interval are remembered for next time.
+      Cycle mode steps a queue of colors across the screens while the overlay is
+      up, which is what a dead-pixel check needs — a stuck subpixel only shows up
+      on some of them. The queue starts as the standard sequence and can be
+      edited a step at a time. A region mode covers only half of each screen, so a
+      color can be judged against what is beside it; an exerciser drifts a block
+      of noise across a panel to free a stuck subpixel; and each monitor can be
+      given a color of its own. The screen is kept awake while an overlay is up, so
+      a display used as a key light does not blank partway through.
     </p>
   </description>
 

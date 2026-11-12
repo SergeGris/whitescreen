@@ -1,7 +1,13 @@
+[workspace]
+# The application is the root package; the members are the parts that must
+# build without it. `cargo build` here still builds just the application,
+# which is what Meson and the packaging call.
+members = ["core"]
+
 [package]
 name         = "whitescreen"
 version      = "1.0.0"
-edition      = "2021"
+edition      = "2024"
 rust-version = "1.92"                 # floor imposed by gtk4 0.11 / glib 0.22
 description  = "Fill any monitor with a solid color — for camera tests, lighting, and backlight checks"
 authors      = ["Sergey Sushilin <sushilinsergey@gmail.com>"]
@@ -27,11 +33,28 @@ name = "whitescreen"
 path = "src/main.rs"
 
 [dependencies]
+# Everything the app knows that is not about GTK: colours, the geometry of
+# the fills, monitor-name matching. Shared with the native Windows front end
+# so the two cannot disagree about what to draw.
+whitescreen-core = { path = "core", version = "1.0.0" }
+
 # v4_14 is the true floor: gdk::Monitor::scale() is the newest API used.
 gtk             = { version = "0.11.2", package = "gtk4", features = ["v4_14"] }
 gtk_layer_shell = { version = "0.8.0",  package = "gtk4-layer-shell" }
 adw             = { version = "0.9.1",  package = "libadwaita", features = ["v1_5"] }
 async-channel   = "2.5.0"
+
+# Depended on directly only to turn on v2_80, which is what exposes
+# g_application_command_line_print_literal(). Without it, everything a
+# forwarded invocation has to say -- the monitor list, every complaint about a
+# mistyped flag -- comes out of the terminal that started the *first*
+# instance instead of the one that typed the command. GLib 2.80 is what GTK
+# 4.14 ships against anyway, so this moves no floor in practice.
+gio             = { version = "0.22.5", features = ["v2_80"] }
+
+# Translations. `gettext-system` uses the gettext in glibc rather than
+# building a copy.
+gettext-rs      = { version = "0.7.2", features = ["gettext-system"] }
 
 # ── `gamma` feature only ──────────────────────────────────────────────────────
 #

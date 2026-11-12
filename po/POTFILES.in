@@ -1,0 +1,17 @@
+# Source files containing translatable strings.
+#
+# Keep this list in sync by hand: xgettext is given exactly these files, so a
+# new file with a gettext() call in it is simply not translated until it is
+# named here. `ninja -C _build whitescreen-pot` regenerates the template.
+data/io.github.SergeGris.WhiteScreen.desktop.in
+data/io.github.SergeGris.WhiteScreen.metainfo.xml.in
+src/color_button.rs
+src/cycle_bar.rs
+src/cycle_queue.rs
+src/fill_bar.rs
+src/i18n.rs
+src/main.rs
+src/main_window.rs
+src/monitor_list.rs
+src/palette.rs
+src/screen_overlay.rs
