@@ -25,7 +25,10 @@
 //! platform that can run it.
 
 pub mod cli;
+pub mod config;
 
+#[cfg(windows)]
+mod badge;
 #[cfg(windows)]
 mod message;
 #[cfg(windows)]
@@ -35,8 +38,12 @@ mod overlay;
 #[cfg(windows)]
 mod paint;
 #[cfg(windows)]
+mod session;
+#[cfg(windows)]
 mod power;
 
+#[cfg(windows)]
+pub use badge::Badge;
 #[cfg(windows)]
 pub use message::pump;
 #[cfg(windows)]
@@ -45,6 +52,8 @@ pub use monitor::{Monitor, monitors, select_matching};
 pub use overlay::{Overlay, OverlayEvent};
 #[cfg(windows)]
 pub use power::KeepAwake;
+#[cfg(windows)]
+pub use session::Session;
 
 /// Printed by `--version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

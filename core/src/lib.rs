@@ -11,6 +11,9 @@
 //! a display.
 
 pub mod glob;
+pub mod ini;
+pub mod queue;
+pub mod settings;
 pub mod kelvin;
 pub mod text;
 

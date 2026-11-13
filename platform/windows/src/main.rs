@@ -21,12 +21,8 @@ fn main() {
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    use std::{thread::sleep, time::{Duration, Instant}};
-
     use whitescreen_core::text::json_string;
-    use whitescreen_win::{
-        KeepAwake, Overlay, OverlayEvent, VERSION, cli, monitors, pump, select_matching,
-    };
+    use whitescreen_win::{Session, VERSION, cli, monitors};
 
     let opts = match cli::parse(std::env::args().skip(1)) {
         Ok(opts) => opts,
@@ -53,70 +49,44 @@ fn main() -> std::process::ExitCode {
         cli::Action::Show => {}
     }
 
-    let screens = monitors();
-    if screens.is_empty() {
-        eprintln!("whitescreen: no monitors");
-        return std::process::ExitCode::FAILURE;
-    }
-
-    // No --monitor means every screen, as --all does.
-    let (chosen, unmatched): (Vec<_>, Vec<String>) = if opts.monitors.is_empty() {
-        (screens.iter().collect(), Vec::new())
-    } else {
-        select_matching(&screens, &opts.monitors)
+    let mut session = match Session::new(&opts) {
+        Ok(session) => session,
+        Err(e) => {
+            eprintln!("whitescreen: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
     };
+
+    let (chosen, unmatched) = session.chosen();
     for pattern in &unmatched {
         eprintln!("whitescreen: no monitor matches {pattern}");
     }
     if chosen.is_empty() {
-        eprintln!(
-            "whitescreen: attached: {}",
-            screens.iter().map(|m| m.key.as_str()).collect::<Vec<_>>().join(", ")
-        );
+        eprintln!("whitescreen: attached: {}", attached());
         return std::process::ExitCode::FAILURE;
     }
 
-    // Held for as long as the colour is up: a screen used as a key light or
-    // left on a test pattern is one nobody touches for minutes.
-    let _awake = KeepAwake::new();
-
-    let color = opts.color.scaled(opts.brightness);
-    let mut overlays = Vec::new();
-    for screen in chosen {
-        let mut overlay = match Overlay::new(screen) {
-            Ok(overlay) => overlay,
-            Err(e) => {
-                eprintln!("whitescreen: cannot cover {}: {e}", screen.key);
-                continue;
-            }
-        };
-        overlay.set_color(color);
-        overlay.set_fill(opts.fill);
-        if let Err(e) = overlay.show(screen) {
-            eprintln!("whitescreen: cannot show on {}: {e}", screen.key);
-            continue;
-        }
-        overlays.push(overlay);
-    }
-    if overlays.is_empty() {
+    if let Err(e) = session.run() {
+        eprintln!("whitescreen: {e}");
         return std::process::ExitCode::FAILURE;
     }
-
-    let deadline = opts.auto_hide.map(|m| Instant::now() + Duration::from_secs(u64::from(m) * 60));
-    while pump() {
-        // Any key or click on any of them takes them all down, which is the
-        // promise the other build makes too.
-        if overlays.iter().any(|o| o.take_event() == Some(OverlayEvent::Dismissed)) {
-            break;
-        }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            break;
-        }
-        // Idle between messages rather than spinning: there is nothing to do
-        // until the user acts or the noise timer fires.
-        sleep(Duration::from_millis(10));
+    // Something was wrong with the invocation even though the colour went
+    // up: say so in the exit code, as the GTK build does.
+    if unmatched.is_empty() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
     }
-    std::process::ExitCode::SUCCESS
+}
+
+/// The monitor names that are there, for when a pattern matched none.
+#[cfg(windows)]
+fn attached() -> String {
+    whitescreen_win::monitors()
+        .iter()
+        .map(|m| m.key.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Print the monitor list, in the same shape the GTK build prints it.

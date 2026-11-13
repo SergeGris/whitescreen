@@ -22,7 +22,6 @@ mod monitor_label;
 mod monitor_list;
 mod palette;
 mod screen_overlay;
-mod settings;
 mod swatch;
 mod tile;
 

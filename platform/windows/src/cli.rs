@@ -9,7 +9,7 @@
 //! to drive: `--cycle` needs a queue to play and `--hide` needs an instance
 //! already running.
 
-use whitescreen_core::{Fill, Rgba, Side};
+use whitescreen_core::{Fill, Rgba, Side, queue};
 
 /// What one invocation asks for.
 #[derive(Clone, PartialEq, Debug)]
@@ -17,12 +17,31 @@ pub struct Options {
     pub color: Rgba,
     /// Shell patterns naming the monitors to cover; empty means every one.
     pub monitors: Vec<String>,
+    /// Patterns paired with a colour of their own, from `--monitor-color`.
+    pub monitor_colors: Vec<(String, Rgba)>,
+    /// Switch per-monitor colours off again, keeping them for next time.
+    pub no_monitor_colors: bool,
     pub fill: Fill,
     pub brightness: f32,
     /// Minutes before the overlays take themselves down; `None` for never.
     pub auto_hide: Option<u32>,
+    /// Play the queue while the overlays are up.
+    pub cycle: bool,
+    /// Seconds on each step, clamped to what the GTK build's spinner offers.
+    pub interval: f64,
+    /// The queue to play, when `--queue` named one.
+    pub queue: Option<Vec<Rgba>>,
+    /// Flash each monitor's name on the screen itself.
+    pub identify: bool,
     pub action: Action,
 }
+
+/// Interval bounds, in seconds, as in the GTK build: the floor is
+/// deliberate, because a full-screen colour flashing faster than that
+/// approaches the rate photosensitive-epilepsy guidance warns about.
+pub const INTERVAL_MIN: f64 = 0.5;
+pub const INTERVAL_MAX: f64 = 60.0;
+pub const INTERVAL_DEFAULT: f64 = 2.0;
 
 /// What to do, once the options are understood.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -38,9 +57,15 @@ impl Default for Options {
         Self {
             color: Rgba::WHITE,
             monitors: Vec::new(),
+            monitor_colors: Vec::new(),
+            no_monitor_colors: false,
             fill: Fill::default(),
             brightness: 1.0,
             auto_hide: None,
+            cycle: false,
+            interval: INTERVAL_DEFAULT,
+            queue: None,
+            identify: false,
             action: Action::Show,
         }
     }
@@ -67,12 +92,23 @@ Options:
                            leaving it clear.
   -b, --brightness PERCENT Scale the color on its way to the screens, 5-100.
   -A, --auto-hide MINUTES  Take the overlays down after this long.
+  -M, --monitor-color NAME=COLOR
+                           Give the monitors matching NAME a color of their
+                           own. Repeat for several.
+      --no-monitor-colors  Forget those again, so every screen follows
+                           --color.
+  -y, --cycle              Step through the queue while the overlays are up.
+  -i, --interval SECONDS   Seconds on each step, 0.5 to 60. Default 2.
+  -q, --queue COLORS       Play this comma-separated list instead of the
+                           default dead-pixel sequence.
+  -I, --identify           Show each monitor's name on the screen itself.
   -l, --list-monitors      Print the monitor names and sizes, then exit.
   -j, --json               With --list-monitors, print JSON.
   -V, --version            Print the version and exit.
   -h, --help               Print this and exit.
 
-Press any key or click an overlay to dismiss it.
+Press any key or click an overlay to dismiss it. While the queue is
+playing, Ctrl+Right and Ctrl+Left step it and Ctrl+Space pauses.
 ";
 
 /// Read one invocation. `Err` carries the message to show the user.
@@ -150,6 +186,34 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
                 let minutes: u32 = v.parse().map_err(|_| format!("not a number of minutes: {v}"))?;
                 opts.auto_hide = (minutes > 0).then_some(minutes);
             }
+            "-M" | "--monitor-color" => {
+                let v = value("--monitor-color")?;
+                opts.monitor_colors.push(parse_monitor_color(&v)?);
+            }
+            "--no-monitor-colors" => opts.no_monitor_colors = true,
+            "-y" | "--cycle" => opts.cycle = true,
+            "-I" | "--identify" => opts.identify = true,
+            "-i" | "--interval" => {
+                let v = value("--interval")?;
+                let secs: f64 = v.parse().map_err(|_| format!("not a number: {v}"))?;
+                // Clamped rather than refused, as the GTK build clamps it to
+                // what its spinner offers.
+                opts.interval = secs.clamp(INTERVAL_MIN, INTERVAL_MAX);
+            }
+            "-q" | "--queue" => {
+                let v = value("--queue")?;
+                let mut colors = Vec::new();
+                for part in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    // All or nothing: a queue missing the step that was
+                    // mistyped would play something nobody asked for.
+                    colors.push(Rgba::parse(part).ok_or_else(|| format!("not a color: {part}"))?);
+                }
+                if colors.is_empty() {
+                    return Err("--queue needs at least one color".to_string());
+                }
+                colors.truncate(queue::MAX_LEN);
+                opts.queue = Some(colors);
+            }
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -163,6 +227,21 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
         opts.action = Action::ListMonitors { json };
     }
     Ok(opts)
+}
+
+/// Split a `--monitor-color` argument into a monitor pattern and a colour.
+///
+/// Split at the *last* `=`, not the first: a monitor is keyed by its device
+/// name, and a name can contain anything. A colour cannot contain `=`.
+fn parse_monitor_color(spec: &str) -> Result<(String, Rgba), String> {
+    let Some((name, color)) = spec.rsplit_once('=') else {
+        return Err(format!("not a NAME=COLOR pair: {spec}"));
+    };
+    if name.is_empty() {
+        return Err(format!("not a NAME=COLOR pair: {spec}"));
+    }
+    let color = Rgba::parse(color).ok_or_else(|| format!("not a color: {color}"))?;
+    Ok((name.to_string(), color))
 }
 
 #[cfg(test)]
@@ -263,5 +342,80 @@ mod tests {
     #[test]
     fn an_unknown_option_is_refused_rather_than_ignored() {
         assert_eq!(parse_args(&["--colour", "red"]).unwrap_err(), "unknown option: --colour");
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    fn parse_args(args: &[&str]) -> Result<Options, String> {
+        parse(args.iter().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn per_monitor_colours_accumulate() {
+        let o = parse_args(&["-M", "DISPLAY1=red", "--monitor-color", "LG*=#00FF00"]).unwrap();
+        assert_eq!(
+            o.monitor_colors,
+            vec![
+                ("DISPLAY1".to_string(), Rgba::new(255, 0, 0)),
+                ("LG*".to_string(), Rgba::new(0, 255, 0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_monitor_colour_splits_at_the_last_equals() {
+        // A device name can contain anything; a colour cannot contain '='.
+        let o = parse_args(&["-M", r"\\.\DISPLAY1=blue"]).unwrap();
+        assert_eq!(o.monitor_colors[0].0, r"\\.\DISPLAY1");
+        let o = parse_args(&["-M", "Acme=1|Model=blue"]).unwrap();
+        assert_eq!(o.monitor_colors[0].0, "Acme=1|Model");
+    }
+
+    #[test]
+    fn a_malformed_pair_says_so() {
+        assert_eq!(
+            parse_args(&["-M", "DISPLAY1"]).unwrap_err(),
+            "not a NAME=COLOR pair: DISPLAY1"
+        );
+        assert_eq!(parse_args(&["-M", "=red"]).unwrap_err(), "not a NAME=COLOR pair: =red");
+        assert_eq!(parse_args(&["-M", "DISPLAY1=octarine"]).unwrap_err(), "not a color: octarine");
+    }
+
+    #[test]
+    fn the_interval_is_clamped_to_what_the_other_build_offers() {
+        assert_eq!(parse_args(&["-i", "1.5"]).unwrap().interval, 1.5);
+        assert_eq!(parse_args(&["-i", "0.1"]).unwrap().interval, INTERVAL_MIN);
+        assert_eq!(parse_args(&["-i", "600"]).unwrap().interval, INTERVAL_MAX);
+        assert_eq!(parse_args(&[]).unwrap().interval, INTERVAL_DEFAULT);
+    }
+
+    #[test]
+    fn a_queue_is_all_or_nothing() {
+        let o = parse_args(&["--queue", "#fff,black, red "]).unwrap();
+        assert_eq!(o.queue, Some(vec![Rgba::WHITE, Rgba::BLACK, Rgba::new(255, 0, 0)]));
+
+        // One mistyped step and none of it is used.
+        assert_eq!(parse_args(&["-q", "white,octarine"]).unwrap_err(), "not a color: octarine");
+        assert_eq!(parse_args(&["-q", " , "]).unwrap_err(), "--queue needs at least one color");
+    }
+
+    #[test]
+    fn a_queue_cannot_exceed_what_the_strip_holds() {
+        let long = (0..30).map(|_| "red").collect::<Vec<_>>().join(",");
+        let o = parse_args(&["-q", &long]).unwrap();
+        assert_eq!(o.queue.unwrap().len(), queue::MAX_LEN);
+    }
+
+    #[test]
+    fn the_remaining_switches_are_off_by_default() {
+        let o = parse_args(&[]).unwrap();
+        assert!(!o.cycle && !o.identify && !o.no_monitor_colors);
+        assert!(o.queue.is_none() && o.monitor_colors.is_empty());
+
+        let o = parse_args(&["--cycle", "--identify", "--no-monitor-colors"]).unwrap();
+        assert!(o.cycle && o.identify && o.no_monitor_colors);
     }
 }

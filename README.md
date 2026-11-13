@@ -117,11 +117,38 @@ cargo build --release -p whitescreen-win   # on Windows
 cargo test -p whitescreen-core             # anywhere
 ```
 
-> **Not done yet:** the control window. Only the overlay half is native so
-> far — the colour chips, the monitor sidebar, the cycle queue and the
-> command line are still GTK-only, so on Windows there is as yet nothing to
-> drive the overlays *from*. That is the next piece, and it is a bigger one:
-> it is most of the UI.
+### What the two builds share
+
+| | Linux (GTK) | Windows (Win32) |
+| --- | --- | --- |
+| Fullscreen overlay per monitor | layer-shell | `WS_POPUP` + `HWND_TOPMOST` |
+| Monitor selection, shell patterns | ✓ | ✓ |
+| Colors by name and `#RRGGBB` | ✓ (any CSS color) | ✓ (the chip names) |
+| Brightness | ✓ | ✓ |
+| Flat, region, exerciser, wedge, grid | ✓ | ✓ |
+| Second color for a region | ✓ | ✓ |
+| Per-monitor colors | ✓ | ✓ |
+| Cycle: queue, interval, custom queue | ✓ | ✓ |
+| Step and pause from an overlay | ✓ | ✓ |
+| Auto-hide | ✓ | ✓ |
+| Identify badges | ✓ | ✓ |
+| Keeping the display awake | idle inhibit | `SetThreadExecutionState` |
+| Monitor hot-plug while covered | ✓ | ✓ |
+| `--list-monitors`, `--json` | ✓ | ✓ |
+| Saved settings | `~/.config/…/settings.ini` | `whitescreen.ini` beside the exe |
+| Translations | ✓ | — |
+| One instance, `--hide` from a keybind | ✓ | — |
+| Control window | ✓ | — |
+
+The settings *format* is one implementation in `whitescreen-core`, right down
+to how a backslash is escaped, so a profile written by one build is read by
+the other. Only the location differs, because the Windows build is portable.
+
+> **Not done yet:** the control window, and with it the two things that need
+> it — translations (nothing on Windows yet shows a translatable string) and
+> a running instance for `--hide` to talk to. Everything the overlays do is
+> there; what is missing is the GUI to drive them from, so on Windows the
+> command line is the whole interface.
 
 ## Building
 

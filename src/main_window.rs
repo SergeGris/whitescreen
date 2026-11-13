@@ -12,7 +12,7 @@ use crate::monitor_label;
 use crate::monitor_list::{self, MonitorList};
 use crate::palette::Palette;
 use crate::screen_overlay::ScreenOverlay;
-use crate::settings::Settings;
+use whitescreen_core::settings::Settings;
 use crate::tile;
 
 #[cfg(feature = "gamma")]
@@ -22,6 +22,16 @@ use crate::i18n::{self, gettext};
 // Minimum preview size; it expands to fill the pane.
 const PREVIEW_W: i32 = 480;
 const PREVIEW_H: i32 = 270; // 16:9
+
+/// Where this platform keeps the settings.
+///
+/// `$XDG_CONFIG_HOME/whitescreen/settings.ini`, which is what the app has
+/// always written. The Windows build keeps its own beside the executable,
+/// because that build is portable; only the location differs, so a profile
+/// copied between the two is read by either.
+fn settings_path() -> std::path::PathBuf {
+    glib::user_config_dir().join("whitescreen").join("settings.ini")
+}
 
 /// Shown by whatever is asked to keep the screen on, where it displays a
 /// reason -- so it says something the user would recognise.
@@ -210,7 +220,7 @@ mod imp {
 
         /// Saved UI state, read once at startup and written back as it
         /// changes.
-        pub settings:    Settings,
+        pub settings:    RefCell<Settings>,
         /// Set while a write is queued on the main loop; see queue_save().
         pub save_queued: Cell<bool>,
 
@@ -298,7 +308,7 @@ mod imp {
                 auto_hide_source: RefCell::new(None),
                 overlays_shown: Cell::new(false),
                 sync_queued: Cell::new(false),
-                settings:    Settings::load(),
+                settings:    RefCell::new(Settings::load(settings_path())),
                 save_queued: Cell::new(false),
                 headless:    Cell::new(false),
                 graveyard: RefCell::new(Vec::new()),
@@ -374,49 +384,69 @@ impl MainWindow {
     /// mode has to come after the side and the second colour, since switching
     /// the mode on is what publishes them.
     fn restore_settings(&self) {
-        let s = &self.imp().settings;
+        // Read everything out first. The colours have to come out of the
+        // core's type anyway, and the setters below call into GTK, which can
+        // call back into us -- holding the borrow across that would be a
+        // panic waiting for the first person to restore a saved profile.
+        let s = self.imp().settings.borrow();
+        let custom = s.custom_color().map(color::from_core);
+        let color = s.color().map(color::from_core);
+        let brightness = s.brightness();
+        let auto_hide = s.auto_hide();
+        let queue: Vec<gdk::RGBA> = s.queue().into_iter().map(color::from_core).collect();
+        let interval = s.cycle_interval();
+        let second = s.second_color().map(color::from_core);
+        let side = s.region_side().as_deref().and_then(color_surface::Side::from_key);
+        let pattern = s.pattern().as_deref().and_then(FillMode::from_key);
+        let monitor_colors: Vec<(String, gdk::RGBA)> = s
+            .monitor_colors()
+            .into_iter()
+            .map(|(key, rgba)| (key, color::from_core(rgba)))
+            .collect();
+        let per_monitor = s.per_monitor_colors();
+        let monitors = s.monitors();
+        drop(s);
 
-        if let (Some(palette), Some(rgba)) = (self.palette(), s.custom_color()) {
+        if let (Some(palette), Some(rgba)) = (self.palette(), custom) {
             palette.set_custom_color(rgba);
         }
-        if let Some(rgba) = s.color() {
+        if let Some(rgba) = color {
             self.set_color(rgba);
         }
-        if let Some(fraction) = s.brightness() {
+        if let Some(fraction) = brightness {
             self.set_brightness(fraction);
         }
-        if let Some(minutes) = s.auto_hide() {
+        if let Some(minutes) = auto_hide {
             self.set_auto_hide(minutes);
         }
 
         if let Some(cycle) = self.cycle() {
-            cycle.set_queue_colors(&s.queue());
-            if let Some(secs) = s.cycle_interval() {
+            cycle.set_queue_colors(&queue);
+            if let Some(secs) = interval {
                 cycle.set_interval(secs);
             }
         }
 
         if let Some(bar) = self.imp().fill_bar.borrow().as_ref() {
-            bar.set_second_color(s.second_color());
-            if let Some(side) = s.region_side().as_deref().and_then(color_surface::Side::from_key) {
+            bar.set_second_color(second);
+            if let Some(side) = side {
                 bar.set_side(side);
             }
             // An unknown name -- a file from a newer version, or a typo in a
             // hand-edited one -- leaves the mode alone rather than resetting
             // it to Flat without saying so.
-            if let Some(mode) = s.pattern().as_deref().and_then(FillMode::from_key) {
+            if let Some(mode) = pattern {
                 bar.set_mode(mode);
             }
         }
 
         if let Some(list) = self.monitor_list() {
-            list.set_colors(&s.monitor_colors().into_iter().collect::<Vec<_>>());
-            list.set_per_monitor(s.per_monitor_colors());
-            let saved = s.monitors();
+            list.set_colors(&monitor_colors);
+            list.set_per_monitor(per_monitor);
             // An empty list means "nothing saved": honouring it would untick
             // the first monitor that MonitorList ticks for a first run.
-            if !saved.is_empty() {
-                list.select_only(saved);
+            if !monitors.is_empty() {
+                list.select_only(monitors);
             }
         }
     }
@@ -442,32 +472,56 @@ impl MainWindow {
     /// Write the current state out.
     fn save_settings(&self) {
         let imp = self.imp();
-        let s = &imp.settings;
 
         // The colour the *user* chose. While the queue is playing, the colour
         // on screen belongs to the timer and will be a different one a second
         // from now; what deserves saving is the one it took over from.
         let playing = self.cycle().is_some_and(|c| c.is_playing());
-        s.set_color(if playing { imp.pre_cycle_color.get() } else { imp.color.get() });
+        let chosen = if playing { imp.pre_cycle_color.get() } else { imp.color.get() };
+
+        // Everything is read out of the widgets before the borrow, for the
+        // reason restore_settings() gives.
+        let custom = self.palette().map(|p| color::to_core(p.custom_color()));
+        let cycle = self
+            .cycle()
+            .map(|c| (c.queue_colors().into_iter().map(color::to_core).collect::<Vec<_>>(), c.interval()));
+        let fill = imp
+            .fill_bar
+            .borrow()
+            .as_ref()
+            .map(|bar| (bar.mode().as_key(), bar.side().as_key(), bar.second_color().map(color::to_core)));
+        let monitors = self.monitor_list().map(|list| {
+            (
+                list.selected(),
+                list.per_monitor(),
+                list.colors()
+                    .into_iter()
+                    .map(|(key, rgba)| (key, color::to_core(rgba)))
+                    .collect::<Vec<_>>(),
+            )
+        });
+
+        let mut s = imp.settings.borrow_mut();
+        s.set_color(color::to_core(chosen));
         s.set_brightness(imp.brightness.get());
         s.set_auto_hide(imp.auto_hide.get());
 
-        if let Some(palette) = self.palette() {
-            s.set_custom_color(palette.custom_color());
+        if let Some(custom) = custom {
+            s.set_custom_color(custom);
         }
-        if let Some(cycle) = self.cycle() {
-            s.set_queue(&cycle.queue_colors());
-            s.set_cycle_interval(cycle.interval());
+        if let Some((queue, interval)) = cycle {
+            s.set_queue(&queue);
+            s.set_cycle_interval(interval);
         }
-        if let Some(bar) = imp.fill_bar.borrow().as_ref() {
-            s.set_pattern(bar.mode().as_key());
-            s.set_region_side(bar.side().as_key());
-            s.set_second_color(bar.second_color());
+        if let Some((pattern, side, second)) = fill {
+            s.set_pattern(pattern);
+            s.set_region_side(side);
+            s.set_second_color(second);
         }
-        if let Some(list) = self.monitor_list() {
-            s.set_monitors(&list.selected());
-            s.set_per_monitor_colors(list.per_monitor());
-            s.set_monitor_colors(&list.colors());
+        if let Some((selected, per_monitor, colors)) = monitors {
+            s.set_monitors(&selected);
+            s.set_per_monitor_colors(per_monitor);
+            s.set_monitor_colors(&colors);
         }
 
         s.save();

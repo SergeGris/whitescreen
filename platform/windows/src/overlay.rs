@@ -64,6 +64,12 @@ pub enum OverlayEvent {
     /// and reading it as "get me out of here", the second is the safer
     /// answer for a full-screen colour with no other keyboard function.
     Dismissed,
+    /// Ctrl+Right, Ctrl+Down or Ctrl+N: the next colour in the queue.
+    Next,
+    /// Ctrl+Left, Ctrl+Up or Ctrl+P.
+    Previous,
+    /// Ctrl+Space: hold the cycle where it is, or let it go on.
+    TogglePause,
 }
 
 /// Per-window state, reached from the window procedure through
@@ -73,7 +79,11 @@ struct State {
     fill: Fill,
     scale: f32,
     seed: u64,
-    dismissed: bool,
+    /// What the window procedure has seen since the owner last asked. One
+    /// slot, because the owner drains it on every pass of the message loop
+    /// and a keystroke that arrived twice in one pass meant the same thing
+    /// twice.
+    event: Option<OverlayEvent>,
 }
 
 /// A fullscreen colour on one monitor.
@@ -95,7 +105,7 @@ impl Overlay {
             fill: Fill::default(),
             scale: monitor.scale,
             seed: whitescreen_core::NOISE_SEED,
-            dismissed: false,
+            event: None,
         })));
 
         let rect = monitor.rect();
@@ -189,7 +199,7 @@ impl Overlay {
         self.monitor = monitor.clone();
         self.with_state(|s| {
             s.scale = monitor.scale;
-            s.dismissed = false;
+            s.event = None;
         });
 
         let rect = monitor.rect();
@@ -219,15 +229,9 @@ impl Overlay {
         }
     }
 
-    /// Whether a key or a click has asked for the overlays to go away since
-    /// this was last checked.
+    /// What this overlay has been asked to do since it was last checked.
     pub fn take_event(&self) -> Option<OverlayEvent> {
-        self.with_state(|s| {
-            s.dismissed.then(|| {
-                s.dismissed = false;
-                OverlayEvent::Dismissed
-            })
-        })
+        self.with_state(|s| s.event.take())
     }
 
     /// The monitor this overlay is currently covering.
@@ -341,13 +345,17 @@ unsafe extern "system" fn wndproc(
             LRESULT(0)
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            if dismisses(wparam) {
-                state.borrow_mut().dismissed = true;
+            // Acting on the colour comes first: those are shortcuts, which
+            // dismisses() deliberately passes through.
+            if let Some(event) = shortcut(wparam) {
+                state.borrow_mut().event = Some(event);
+            } else if dismisses(wparam) {
+                state.borrow_mut().event = Some(OverlayEvent::Dismissed);
             }
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            state.borrow_mut().dismissed = true;
+            state.borrow_mut().event = Some(OverlayEvent::Dismissed);
             LRESULT(0)
         }
         WM_SETCURSOR => {
@@ -360,6 +368,27 @@ unsafe extern "system" fn wndproc(
         }
         WM_DESTROY => LRESULT(0),
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// What this keystroke asks the overlay to do, if anything.
+///
+/// Every one of them is a Ctrl combination, and that is not a style choice:
+/// a bare key takes the overlay down, and being able to get out with
+/// whatever key you hit first is the one promise here that must not be
+/// broken to add a shortcut. The same keys as the GTK build.
+fn shortcut(key: WPARAM) -> Option<OverlayEvent> {
+    if unsafe { GetKeyState(i32::from(VK_CONTROL.0)) } >= 0 {
+        return None;
+    }
+    match key.0 as u16 {
+        // VK_RIGHT, VK_DOWN, 'N'
+        0x27 | 0x28 | 0x4E => Some(OverlayEvent::Next),
+        // VK_LEFT, VK_UP, 'P'
+        0x25 | 0x26 | 0x50 => Some(OverlayEvent::Previous),
+        // VK_SPACE
+        0x20 => Some(OverlayEvent::TogglePause),
+        _ => None,
     }
 }
 
