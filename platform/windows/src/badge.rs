@@ -7,29 +7,37 @@
 //! Click-through, so a badge never intercepts a click meant for the overlay
 //! underneath it, and anchored to the bottom-right corner with the same
 //! margin the GTK build uses.
+//!
+//! It is shaped like a Windows 11 surface: a dark Fluent panel with rounded
+//! corners and a hairline edge, lettered in the face Windows 11 cuts for
+//! large text. The corners are colour-keyed out rather than painted, the
+//! same way `Overlay` makes a region's uncovered half transparent -- the
+//! badge sits on whatever colour the overlay is showing, so a painted corner
+//! would have to guess at it.
 
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject,
-    DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, GetTextExtentPoint32W, HDC, HFONT,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
-    DT_LEFT, DT_SINGLELINE, DT_TOP,
+    BeginPaint, CLEARTYPE_QUALITY, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, FillRect,
+    GetTextExtentPoint32W, HDC, HFONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, DT_LEFT, DT_SINGLELINE, DT_TOP,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST,
-    RegisterClassW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
+    GetWindowLongPtrW, HWND_TOPMOST, LWA_COLORKEY, RegisterClassW, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    SW_HIDE, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
+    WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
 use whitescreen_core::Rgba;
 
 use crate::monitor::Monitor;
-use crate::paint::colorref;
+use crate::paint::{TRANSPARENT_KEY, colorref};
 
 /// Distance from the corner of the screen, matching the GTK build.
 const MARGIN: i32 = 24;
@@ -40,9 +48,16 @@ const PAD: i32 = 16;
 const TITLE_PT: i32 = 42;
 const SUBTITLE_PT: i32 = 11;
 
-const BACKGROUND: Rgba = Rgba::new(32, 32, 32);
+/// Fluent's dark surface, its hairline, and its two text colours. The badge
+/// is always dark: it has to read against a white screen, which is the
+/// colour it will be sitting on most often.
+const BACKGROUND: Rgba = Rgba::new(0x20, 0x20, 0x20);
+const EDGE: Rgba = Rgba::new(0x3A, 0x3A, 0x3A);
 const FOREGROUND: Rgba = Rgba::new(255, 255, 255);
-const DIM: Rgba = Rgba::new(170, 170, 170);
+const DIM: Rgba = Rgba::new(0xC8, 0xC8, 0xC8);
+
+/// The corner, in logical pixels: WinUI's radius for a surface this size.
+const RADIUS: i32 = 12;
 
 const CLASS_NAME: PCWSTR = w!("WhiteScreenBadge");
 
@@ -94,6 +109,11 @@ impl Badge {
         };
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
+            // Everything painted in the key colour becomes a hole, which is
+            // what rounds the corners. It also settles the layering: a
+            // `WS_EX_LAYERED` window that is never given its attributes is
+            // not one Windows promises to show at all.
+            SetLayeredWindowAttributes(hwnd, colorref(TRANSPARENT_KEY), 255, LWA_COLORKEY)?;
         }
         Ok(Self { hwnd, state })
     }
@@ -192,22 +212,27 @@ fn font(points: i32, scale: f32) -> HFONT {
     // Negative height asks for a character height rather than a cell height,
     // which is what a point size means.
     let height = -((points as f32 * scale * 96.0 / 72.0) as i32);
+    // The name is the thing being read across a room, so it gets the weight
+    // and the face Windows 11 cuts for large text; the model line under it
+    // stays a plain caption.
+    let display = points >= TITLE_PT;
+    let weight = if display { FW_SEMIBOLD } else { FW_NORMAL };
     unsafe {
         CreateFontW(
             height,
             0,
             0,
             0,
-            FW_NORMAL.0 as i32,
+            weight.0 as i32,
             0,
             0,
             0,
             DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,
             Default::default(),
-            Default::default(),
+            CLEARTYPE_QUALITY,
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            w!("Segoe UI"),
+            crate::theme::ui_face(display),
         )
     }
 }
@@ -255,7 +280,12 @@ unsafe extern "system" fn wndproc(
             let dc = unsafe { BeginPaint(hwnd, &raw mut ps) };
             {
                 let s = state.borrow();
-                draw(dc, ps.rcPaint, &s);
+                // The whole window, not the invalid rectangle: a rounded
+                // panel drawn into a sub-rectangle would be a rounded panel
+                // in the middle of the badge.
+                let mut client = RECT::default();
+                let _ = unsafe { GetClientRect(hwnd, &raw mut client) };
+                draw(dc, client, &s);
             }
             let _ = unsafe { EndPaint(hwnd, &raw const ps) };
             LRESULT(0)
@@ -266,11 +296,18 @@ unsafe extern "system" fn wndproc(
 }
 
 fn draw(dc: HDC, bounds: RECT, state: &State) {
+    // Clear to the key colour, so everywhere the panel does not reach --
+    // the four corners -- ends up a hole.
     unsafe {
-        let brush = CreateSolidBrush(colorref(BACKGROUND));
+        let brush = CreateSolidBrush(colorref(TRANSPARENT_KEY));
         FillRect(dc, &raw const bounds, brush);
         let _ = DeleteObject(brush.into());
+    }
+    // The panel: a Fluent surface, with the hairline every one of them has.
+    let radius = (RADIUS as f32 * state.scale) as i32;
+    crate::theme::round_rect(dc, bounds, radius, Some(BACKGROUND), Some(EDGE));
 
+    unsafe {
         SetBkMode(dc, TRANSPARENT);
 
         let pad = (PAD as f32 * state.scale) as i32;

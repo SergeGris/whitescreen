@@ -6,10 +6,11 @@
 //! shortcut or a script — the same way the GTK build is used from a
 //! compositor keybind.
 //!
-//! The control window is not here yet, so there is no UI state to keep and
-//! nothing to save. That is what makes "portable" easy today, and it is a
-//! promise worth keeping when the window does arrive: settings should land
-//! beside the executable, not in the registry.
+//! What the window changes is kept in `whitescreen.ini` beside the
+//! executable, never in the registry, so the stick carries the settings with
+//! it. If that directory is read-only -- a download folder, a share -- the
+//! file falls back to the user's own profile rather than failing to save; see
+//! `config`.
 
 #[cfg(not(windows))]
 fn main() {
@@ -108,11 +109,7 @@ fn attached() -> String {
 
 /// Print the monitor list, in the same shape the GTK build prints it.
 #[cfg(windows)]
-fn list(
-    screens: &[whitescreen_win::Monitor],
-    json: bool,
-    quote: fn(&str) -> String,
-) {
+fn list(screens: &[whitescreen_win::Monitor], json: bool, quote: fn(&str) -> String) {
     if !json {
         for m in screens {
             println!("{}\t{} × {}", m.key, m.width, m.height);

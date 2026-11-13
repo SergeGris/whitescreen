@@ -76,6 +76,8 @@ implements that natively — no GTK, no Wayland, no fallback mode:
   rather than painting it black.
 - **`SetThreadExecutionState`** to hold the display awake, the counterpart of
   the idle inhibitor.
+- **A control window built to look like Windows 11** — see
+  [below](#the-windows-control-window).
 
 What keeps the two front ends honest is that neither owns the answers. The
 bands of a wedge, the halves of a region, the color of a 3200 K key light and
@@ -87,7 +89,9 @@ so a fix to the wedge's seam arithmetic cannot land on one platform only.
 The Windows build is one executable and nothing else: unzip it and run it,
 from a USB stick if you like. No installer, no registry, nothing written
 anywhere, and no Visual C++ redistributable to install first — the C runtime
-is linked statically (see `.cargo/config.toml`).
+is linked statically (see `.cargo/config.toml`). The side-by-side manifest is
+embedded in the executable rather than shipped beside it (see `build.rs`), so
+there is nothing to lose on the way to the stick.
 
 Every push to the default branch publishes it alongside the Flatpak bundle:
 
@@ -136,6 +140,8 @@ cargo test -p whitescreen-core             # anywhere
 | Monitor hot-plug while covered | ✓ | ✓ |
 | `--list-monitors`, `--json` | ✓ | ✓ |
 | Saved settings | `~/.config/…/settings.ini` | `whitescreen.ini` beside the exe |
+| Follows the system light/dark theme | ✓ (libadwaita) | ✓ (Fluent, high contrast too) |
+| System accent color | — | ✓ |
 | Translations | ✓ | — |
 | One instance, `--hide` from a keybind | ✓ | — |
 | Control window | ✓ | partial — see below |
@@ -146,24 +152,59 @@ the other. Only the location differs, because the Windows build is portable.
 
 #### The Windows control window
 
-`whitescreen.exe` with no arguments opens a native Win32 window: the
+`whitescreen.exe` with no arguments opens a native Win32 window: a live
 preview, the color chips, the key-light temperatures, Custom (through the
 system color picker), brightness, **Applies to**, the monitor list, the four
-fill modes, Cycle, Identify, and Show / Hide. Anything it changes goes
-through the same `Session` the command line drives, so the two cannot
-disagree.
+fill modes, Cycle, Identify, and Show / Hide, grouped into cards. Anything it
+changes goes through the same `Session` the command line drives, so the two
+cannot disagree.
 
-It is **not finished**, and these are the parts still missing against the
-GTK window:
+It is built to look like a Windows 11 app rather than like Win32:
+
+- **Themed common controls.** An embedded side-by-side manifest asks for
+  ComCtl32 v6; without it a Win32 window renders in the Windows 95 style
+  whatever else it does.
+- **The Fluent palette, resolved from the system.** Light and dark follow
+  `AppsUseLightTheme`, the accent colour comes from DWM — so the buttons are
+  the colour the user chose in Settings — and when a **high contrast** theme
+  is on, the whole palette comes from `GetSysColor` instead and none of the
+  Fluent colours are used. A change to any of them is picked up live, from
+  `WM_SETTINGCHANGE`.
+- **Segoe UI Variable**, in WinUI's type ramp — Body, Body Strong, Caption,
+  Subtitle — falling back to Segoe UI on Windows 10, and scaled by the
+  accessibility text-size setting as well as by DPI.
+- **A Windows 11 frame:** rounded corners, a dark title bar when the apps are
+  dark, and the Mica backdrop. Where Mica is unavailable (Windows 10, or 11
+  before 22H2) the title bar is painted to match the page instead, which
+  comes out seamless by other means.
+- **WinUI geometry and states:** an 8 px grid, 8 px corners on a card and
+  4 px on a control, 32 px rows, and hover, pressed and focus states on
+  everything. The controls are real `BUTTON` and `COMBOBOX` windows — Tab,
+  Space, the arrow keys and a screen reader all work — but their faces are
+  owner-drawn, because a themed Win32 checkbox draws its own label in the
+  *theme's* colour, which is black whatever the app wants, and dark mode
+  would be black text on a near-black card. The brightness slider keeps its
+  trackbar and is custom-drawn through `NM_CUSTOMDRAW`, so the control, its
+  keyboard handling and its accessibility stay real while the channel and
+  thumb come out Fluent.
+- **An icon drawn at run time**, in the accent colour, at whatever sizes the
+  shell asks for: a portable single executable has nowhere to keep a `.ico`.
+
+None of the drawing above has been seen on a real screen: CI type-checks and
+lints it for `x86_64-pc-windows-msvc`, links the release executable and runs
+`--version`, `--help` and `--list-monitors`, but a GitHub runner cannot open a
+window and judge it. Corrections from anyone who can are welcome.
+
+These parts are still missing against the GTK window:
 
 - the cycle queue strip — the queue plays, and `--queue` sets it, but there
   is no UI to edit the steps
 - the interval and auto-hide controls (`--interval` and `--auto-hide` work)
 - the region side buttons and the second-color picker (`--region` and
   `--second-color` work)
-- per-monitor color swatches in the sidebar, so the card can only be aimed
-  from **Applies to**, not by clicking a monitor
-- section headings, the "keeps a color of its own" hint, and translations
+- clicking a monitor row aims the chips at it — the row shows that screen's
+  colour, but the card is still aimed from **Applies to**
+- translations: the window's own strings are English only
 
 > **Also still Linux-only:** one running instance, which is what `--hide`
 > from a keybind talks to.

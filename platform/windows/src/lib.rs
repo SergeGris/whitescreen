@@ -1,4 +1,4 @@
-//! The native Windows front end: monitor enumeration and the overlays.
+//! The native Windows front end: the control window and the overlays.
 //!
 //! Windows has no `wlr-layer-shell`, and it does not need one. A borderless
 //! `WS_POPUP` window sized to a monitor and kept on `HWND_TOPMOST` is exactly
@@ -13,9 +13,11 @@
 //!
 //! # Scope
 //!
-//! This is the overlay half of the app -- the part that must be native
-//! because there is no cross-platform way to own a screen. The control
-//! window is not here yet; see the README.
+//! Both halves of the app are here: the overlays, which have to be native
+//! because there is no cross-platform way to own a screen, and the control
+//! window, which is native because a Windows app should look like one. The
+//! window's Fluent palette, type ramp and window chrome live in `theme`, and
+//! `window` draws against them.
 //!
 //! Everything that touches Win32 compiles only on Windows; on any other host
 //! those parts are simply absent, so building the workspace on Linux neither
@@ -30,6 +32,8 @@ pub mod config;
 #[cfg(windows)]
 mod badge;
 #[cfg(windows)]
+mod icon;
+#[cfg(windows)]
 mod message;
 #[cfg(windows)]
 mod monitor;
@@ -38,16 +42,18 @@ mod overlay;
 #[cfg(windows)]
 mod paint;
 #[cfg(windows)]
+mod power;
+#[cfg(windows)]
 mod session;
 #[cfg(windows)]
-mod window;
+mod theme;
 #[cfg(windows)]
-mod power;
+mod window;
 
 #[cfg(windows)]
 pub use badge::Badge;
 #[cfg(windows)]
-pub use message::pump;
+pub use message::{pump, pump_dialog};
 #[cfg(windows)]
 pub use monitor::{Monitor, monitors, select_matching};
 #[cfg(windows)]

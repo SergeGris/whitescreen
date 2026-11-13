@@ -541,12 +541,25 @@ impl Session {
     /// A screen plugged in while the colour is up gets covered too, rather
     /// than staying the one conspicuously bright panel in the room.
     fn rescan(&mut self) -> windows::core::Result<()> {
+        self.refresh_screens().map(|_| ())
+    }
+
+    /// Re-read the attached monitors, and say whether they changed.
+    ///
+    /// The control window needs this on a display change whether or not
+    /// anything is on screen, which is why it does not simply call
+    /// `rebuild`: that creates the overlays, and a monitor plugged in while
+    /// nothing is showing must not light one up.
+    pub fn refresh_screens(&mut self) -> windows::core::Result<bool> {
         let now = monitors();
         if now == self.screens {
-            return Ok(());
+            return Ok(false);
         }
         self.screens = now;
-        self.rebuild()
+        if self.showing {
+            self.rebuild()?;
+        }
+        Ok(true)
     }
 
     /// Make the overlays and badges match the monitors now attached.
