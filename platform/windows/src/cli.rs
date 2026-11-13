@@ -9,7 +9,7 @@
 //! to drive: `--cycle` needs a queue to play and `--hide` needs an instance
 //! already running.
 
-use whitescreen_core::{Fill, Pattern, Rgba, Side, queue};
+use whitescreen_core::{Fill, Pattern, Rgba, Side, options, queue};
 
 /// What one invocation asks for.
 #[derive(Clone, PartialEq, Debug)]
@@ -166,11 +166,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
             }
             "-b" | "--brightness" => {
                 let v = value("--brightness")?;
-                let percent: f32 = v.parse().map_err(|_| format!("not a number: {v}"))?;
-                if !(5.0..=100.0).contains(&percent) {
-                    return Err(format!("--brightness is 5 to 100, not {v}"));
+                let percent: f64 = v.parse().map_err(|_| format!("not a number: {v}"))?;
+                if !options::brightness_in_range(percent) {
+                    return Err(format!(
+                        "--brightness is {} to {}, not {v}",
+                        options::BRIGHTNESS_MIN_PERCENT, options::BRIGHTNESS_MAX_PERCENT
+                    ));
                 }
-                opts.brightness = percent / 100.0;
+                opts.brightness = (percent / 100.0) as f32;
             }
             "-A" | "--auto-hide" => {
                 let v = value("--auto-hide")?;
@@ -222,17 +225,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
 
 /// Split a `--monitor-color` argument into a monitor pattern and a colour.
 ///
-/// Split at the *last* `=`, not the first: a monitor is keyed by its device
-/// name, and a name can contain anything. A colour cannot contain `=`.
+/// The splitting rule is the core's, because the GTK build takes the same
+/// argument; only what counts as a colour differs between them.
 fn parse_monitor_color(spec: &str) -> Result<(String, Rgba), String> {
-    let Some((name, color)) = spec.rsplit_once('=') else {
+    let Some((name, color)) = options::split_monitor_color(spec) else {
         return Err(format!("not a NAME=COLOR pair: {spec}"));
     };
-    if name.is_empty() {
-        return Err(format!("not a NAME=COLOR pair: {spec}"));
-    }
-    let color = Rgba::parse(color).ok_or_else(|| format!("not a color: {color}"))?;
-    Ok((name.to_string(), color))
+    let parsed = Rgba::parse(color).ok_or_else(|| format!("not a color: {color}"))?;
+    Ok((name.to_string(), parsed))
 }
 
 #[cfg(test)]

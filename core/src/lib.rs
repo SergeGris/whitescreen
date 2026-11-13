@@ -13,6 +13,7 @@
 pub mod glob;
 pub mod ini;
 pub mod listing;
+pub mod options;
 pub mod queue;
 pub mod settings;
 pub mod kelvin;

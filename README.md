@@ -85,17 +85,28 @@ the `--monitor` matcher all live in `whitescreen-core` and are tested there,
 so a fix to the wedge's seam arithmetic cannot land on one platform only.
 
 That is a rule the tree is still being brought round to, and every time a
-piece moves it turns out the two copies had already drifted. The five
-pattern modes were defined three times over, and the Windows copy could not
-tell a flat color from a region covering the whole screen, so its Region
-button sat lit on a fresh profile. The cycle interval's floor — a safety
-limit, not a preference — was written out twice. `--list-monitors --json`
-was built by hand on each side, and the Windows one had grown a `primary`
-field the GTK one never printed. All three are now one implementation with
-the format pinned by tests, which is also why `primary` is in the JSON on
-both platforms: it reads `null` on Wayland, where GDK 4 removed the
-question, rather than being absent on one platform and present on the
-other.
+piece moves it turns out the two copies had already drifted:
+
+- the five **pattern modes** were defined three times over, and the Windows
+  copy could not tell a flat color from a region covering the whole screen,
+  so its Region button sat lit on a fresh profile;
+- the **cycle interval**'s floor — a safety limit, not a preference — was
+  written out twice, and neither copy noticed that `nan` parses as a number
+  and survives a clamp, which stopped the queue for good;
+- **`--list-monitors --json`** was built by hand on each side, and the
+  Windows one had grown a `primary` field the GTK one never printed;
+- **`--brightness`** out of range was refused on Windows and silently
+  clamped on Linux;
+- **`--monitor-color NAME=COLOR`** had its splitting rule written twice, and
+  only the GTK copy trimmed the color, so `"DP-1= red"` worked on one
+  platform alone.
+
+All five are now one implementation with the behavior pinned by tests. That
+is also why `primary` is in the JSON on both platforms: it reads `null` on
+Wayland, where GDK 4 removed the question, rather than being absent on one
+platform and present on the other. An out-of-range `--brightness` is now
+refused on both, which is what every other bad value on that command line
+already did.
 
 ### Portable
 

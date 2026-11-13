@@ -8,7 +8,7 @@ use gtk::gio::prelude::ApplicationCommandLineExt;
 use gtk::{gdk, gio, glib};
 
 use crate::i18n::{gettext, mark};
-use whitescreen_core::listing;
+use whitescreen_core::{listing, options as core_options};
 
 mod color;
 mod color_button;
@@ -268,17 +268,14 @@ enum BadMonitorColor {
 
 /// Split a `--monitor-color` argument into a monitor pattern and a colour.
 ///
-/// Split at the *last* `=`, not the first: a monitor that reports no
-/// connector name is keyed by its EDID text (see `monitor_ident()`), which
-/// can contain any character at all, `=` included. A colour cannot.
+/// The splitting rule is the core's, because the portable build takes the
+/// same argument; only what counts as a colour differs, this build having
+/// GDK to parse any CSS one.
 fn parse_monitor_color(spec: &str) -> Result<(String, gdk::RGBA), BadMonitorColor> {
-    let Some((name, color)) = spec.rsplit_once('=') else {
+    let Some((name, color)) = core_options::split_monitor_color(spec) else {
         return Err(BadMonitorColor::Malformed);
     };
-    if name.is_empty() {
-        return Err(BadMonitorColor::Malformed);
-    }
-    match gdk::RGBA::parse(color.trim()) {
+    match gdk::RGBA::parse(color) {
         Ok(rgba) => Ok((name.to_string(), rgba)),
         Err(_)   => Err(BadMonitorColor::NotAColor(color.to_string())),
     }
@@ -355,7 +352,22 @@ fn apply_options(win: &main_window::Window, inv: &Invocation) {
     }
 
     if let Ok(Some(percent)) = options.lookup::<f64>("brightness") {
-        win.set_brightness(percent / 100.0);
+        // Refused rather than quietly clamped, as the portable build
+        // refuses it and as every other bad value here is refused: a
+        // brightness that silently became something else is the one that
+        // would be found out later, on a measurement.
+        if core_options::brightness_in_range(percent) {
+            win.set_brightness(percent / 100.0);
+        } else {
+            inv.complain(&i18n::format(
+                &gettext("--brightness is {0} to {1}, not {2}"),
+                &[
+                    &core_options::BRIGHTNESS_MIN_PERCENT.to_string(),
+                    &core_options::BRIGHTNESS_MAX_PERCENT.to_string(),
+                    &percent.to_string(),
+                ],
+            ));
+        }
     }
 
     if options.contains("all") {
