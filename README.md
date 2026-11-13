@@ -60,9 +60,14 @@ surface this app wants, and it is an ordinary window. `whitescreen-win`
 implements that natively — no GTK, no Wayland, no fallback mode:
 
 - **Monitor enumeration** through `EnumDisplayMonitors`, keyed by the display
-  device (`\\.\DISPLAY1`) and labelled with the adapter's own string ("Dell
-  U2415"). `--monitor` patterns match either, through the same matcher the
-  GTK build uses.
+  device (`\\.\DISPLAY1`), which is the stable name the settings file stores.
+  The name a *person* recognises comes from the display configuration —
+  `DisplayConfigGetDeviceInfo`, which reports what the monitor says it is
+  ("DELL U2415") and which socket it arrived on. `EnumDisplayDevices` cannot
+  answer that: asked about a display device it describes the monitor driver,
+  so every screen on the machine comes back "Generic PnP Monitor".
+  `--monitor` patterns match the device name or the model, through the same
+  matcher the GTK build uses.
 - **One overlay per monitor** — topmost, no taskbar button, cursor hidden,
   and any key or click takes them down, by the same rule as on Wayland (a
   bare key dismisses; <kbd>Ctrl</kbd>/<kbd>Alt</kbd>/<kbd>Win</kbd>
@@ -116,6 +121,15 @@ anywhere, and no Visual C++ redistributable to install first — the C runtime
 is linked statically (see `.cargo/config.toml`). The side-by-side manifest is
 embedded in the executable rather than shipped beside it (see `build.rs`), so
 there is nothing to lose on the way to the stick.
+
+It is a **windowed** program, not a console one: double-clicking it opens the
+window and nothing else, where a console-subsystem program would have
+Windows open a terminal to put it in first. Run from a shell it joins the
+console it was launched from, so `--help`, `--version` and `--list-monitors`
+print where they were typed — with one unavoidable wrinkle, that the shell
+does not wait for a windowed program, so the prompt comes back before the
+output does. Piping (`whitescreen.exe --list-monitors | more`) waits as
+usual.
 
 Every push to the default branch publishes it alongside the Flatpak bundle:
 
@@ -182,6 +196,13 @@ system color picker), brightness, **Applies to**, the monitor list, the four
 fill modes, Cycle, Identify, and Show / Hide, grouped into cards. Anything it
 changes goes through the same `Session` the command line drives, so the two
 cannot disagree.
+
+The preview is the *shape* of the screen it stands for, not the shape of the
+card it sits in: a wedge judged in the wrong aspect ratio has bands of the
+wrong width and a grid the wrong pitch, which is the whole of what a preview
+is for. Aiming **Applies to** at another screen resizes it. Each row in the
+monitor list carries that screen's name, the connector it is on, its mode,
+and a swatch of the color it will get.
 
 It is built to look like a Windows 11 app rather than like Win32:
 

@@ -58,20 +58,20 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_OWNERDRAW, CB_ADDSTRING, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN,
     CB_RESETCONTENT, CB_SETCURSEL, CB_SETITEMHEIGHT, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CBS_OWNERDRAWFIXED, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, HMENU, IDC_ARROW, IDCANCEL,
-    IDOK, LoadCursorW, MINMAXINFO, MoveWindow, PostQuitMessage, RegisterClassW,
-    SPI_SETHIGHCONTRAST, SPI_SETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
-    SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL, WM_MEASUREITEM,
-    WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PRINTCLIENT, WM_SETFONT, WM_SETTINGCHANGE,
-    WM_SIZE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
-    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CBS_HASSTRINGS, CBS_OWNERDRAWFIXED, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
+    DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, HMENU,
+    IDC_ARROW, IDCANCEL, IDOK, LoadCursorW, MINMAXINFO, MoveWindow, PostQuitMessage,
+    RegisterClassW, SPI_SETHIGHCONTRAST, SPI_SETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL,
+    WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PRINTCLIENT, WM_SETFONT,
+    WM_SETTINGCHANGE, WM_SIZE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
-use whitescreen_core::{Fill, Pattern, Rgba, Side, kelvin};
+use whitescreen_core::{Fill, Pattern, Rgba, Side, kelvin, listing};
 
 use crate::icon::Icons;
 use crate::paint::{colorref, paint};
@@ -138,8 +138,11 @@ mod metric {
     /// A control's height, and the gap between two rows of them.
     pub const ROW: f32 = 32.0;
     pub const ROW_GAP: f32 = 8.0;
-    /// The live preview.
-    pub const PREVIEW: f32 = 164.0;
+    /// A monitor row, which carries two lines: the name and the detail.
+    pub const MONITOR_ROW: f32 = 46.0;
+    /// The tallest the live preview goes. Its width follows from the shape
+    /// of the screen it stands for, so this is the only fixed dimension.
+    pub const PREVIEW: f32 = 232.0;
     /// The monitor list down the left.
     pub const SIDEBAR: f32 = 296.0;
     /// A colour chip, and the shorter key-light chip.
@@ -159,7 +162,7 @@ mod metric {
     /// Below this the cards start to overlap, so the window will not go:
     /// the sidebar, a gap, and a colour card wide enough for six chips.
     pub const MIN_W: f32 = 800.0;
-    pub const MIN_H: f32 = 760.0;
+    pub const MIN_H: f32 = 820.0;
 }
 
 /// What a control is, which decides how it draws and what a click means.
@@ -190,6 +193,9 @@ struct Control {
     /// Kept as well as set on the window, because an owner-drawn control
     /// has to draw its own label.
     label: String,
+    /// The second line, where there is one: a monitor row's connector and
+    /// mode under its name.
+    detail: String,
     /// Whether the pointer is over it. Maintained by `hover_proc`.
     hot: bool,
 }
@@ -286,6 +292,23 @@ impl State {
         color.scaled(self.session.brightness())
     }
 
+    /// The shape of the screen the preview stands for: whichever one
+    /// "Applies to" names, or the first attached when it names all of them.
+    ///
+    /// 16:9 when there is nothing to ask -- no screen is a shape at all,
+    /// and a preview has to be some shape.
+    fn aimed_aspect(&self) -> (f32, f32) {
+        let screens = self.session.screens();
+        let screen = match &self.target {
+            Some(key) => screens.iter().find(|m| m.key == *key),
+            None => screens.first(),
+        };
+        match screen {
+            Some(m) if m.width > 0 && m.height > 0 => (m.width as f32, m.height as f32),
+            _ => (16.0, 9.0),
+        }
+    }
+
     /// The colour the chips are currently aimed at, so the matching chip can
     /// show itself as the selected one.
     fn aimed_color(&self) -> Rgba {
@@ -360,8 +383,8 @@ impl ControlWindow {
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                960,
-                840,
+                980,
+                900,
                 None,
                 None,
                 Some(instance()?),
@@ -502,7 +525,15 @@ fn spawn(
     let (class, style) = match kind {
         Kind::Combo => (
             PCWSTR(w!("COMBOBOX").as_ptr()),
-            CBS_DROPDOWNLIST as u32 | CBS_OWNERDRAWFIXED as u32 | WS_VSCROLL.0,
+            // CBS_HASSTRINGS is not optional with an owner-drawn combo box:
+            // without it the control keeps no strings at all and
+            // CB_ADDSTRING's argument is held as opaque item data, so asking
+            // for the text back hands you a pointer value rendered as
+            // characters.
+            CBS_DROPDOWNLIST as u32
+                | CBS_OWNERDRAWFIXED as u32
+                | CBS_HASSTRINGS as u32
+                | WS_VSCROLL.0,
         ),
         Kind::Slider => (
             TRACKBAR_CLASSW,
@@ -540,23 +571,37 @@ fn spawn(
     }
     // Everything lives in a card except the commands at the foot.
     let on_card = !matches!(id, ID_SHOW | ID_HIDE);
-    Ok(Control { hwnd, id, kind, on_card, label: label.to_string(), hot: false })
+    Ok(Control {
+        hwnd,
+        id,
+        kind,
+        on_card,
+        label: label.to_string(),
+        detail: String::new(),
+        hot: false,
+    })
 }
 
 /// One row per attached monitor, and the drop-down to match.
 fn fill_monitor_list(hwnd: HWND, cell: &RefCell<State>) -> windows::core::Result<()> {
     let screens: Vec<_> = cell.borrow().session.screens().to_vec();
+    let labels = screen_labels(&screens);
 
     let mut created = Vec::new();
-    for (i, screen) in screens.iter().enumerate() {
-        let label = format!("{}   {}×{}", screen.key, screen.width, screen.height);
-        created.push(spawn(
+    for (i, (screen, label)) in screens.iter().zip(&labels).enumerate() {
+        // The window text carries both lines, because that is what a screen
+        // reader reads out.
+        let detail = screen.detail();
+        let mut control = spawn(
             hwnd,
             cell as *const _ as usize,
-            &label,
+            &format!("{label} — {detail}"),
             ID_MONITOR_FIRST + i,
             Kind::Monitor,
-        )?);
+        )?;
+        control.label = label.clone();
+        control.detail = detail;
+        created.push(control);
     }
 
     // The font comes with the reload that follows; this only has to get the
@@ -564,6 +609,16 @@ fn fill_monitor_list(hwnd: HWND, cell: &RefCell<State>) -> windows::core::Result
     cell.borrow_mut().controls.extend(created);
     sync_applies_to(cell);
     Ok(())
+}
+
+/// What to call each screen in the window.
+///
+/// The name the monitor reports, made unique: two of the same model report
+/// the same name, and a list offering "DELL U2415" twice is one nobody can
+/// choose from. The *key* is untouched -- it is what the settings file and
+/// `--monitor` use, and it is already unique.
+fn screen_labels(screens: &[crate::Monitor]) -> Vec<String> {
+    listing::unique(screens.iter().map(|m| m.label().to_string()))
 }
 
 /// Rebuild the window's idea of what is plugged in.
@@ -614,15 +669,20 @@ fn sync_applies_to(cell: &RefCell<State>) {
         SendMessageW(combo.hwnd, CB_RESETCONTENT, None, None);
     }
     let mut names = vec!["All monitors".to_string()];
-    names.extend(state.session.screens().iter().map(|m| m.key.clone()));
+    names.extend(screen_labels(state.session.screens()));
     for name in &names {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
             SendMessageW(combo.hwnd, CB_ADDSTRING, None, Some(LPARAM(wide.as_ptr() as isize)));
         }
     }
-    let selected =
-        state.target.as_ref().and_then(|key| names.iter().position(|n| n == key)).unwrap_or(0);
+    // By position, not by name: the rows are labelled for a person now, and
+    // what is aimed at is still a key.
+    let selected = state
+        .target
+        .as_ref()
+        .and_then(|key| state.session.screens().iter().position(|m| m.key == *key))
+        .map_or(0, |at| at + 1);
     unsafe {
         SendMessageW(combo.hwnd, CB_SETCURSEL, Some(WPARAM(selected)), None);
     }
@@ -1167,11 +1227,29 @@ fn layout(hwnd: HWND, state: &RefCell<State>) {
             role: Role::Caption,
         });
 
-        chrome.preview = page.row(px(metric::PREVIEW), gap);
+        // The preview is the shape of the screen it stands for, not the
+        // shape of the card it sits in. A wedge judged in the wrong aspect
+        // ratio has bands of the wrong width, and a grid the wrong pitch,
+        // which is the whole of what the preview is for.
+        let (aspect_w, aspect_h) = s.aimed_aspect();
+        let tall = px(metric::PREVIEW);
+        let mut preview_h = tall;
+        let mut preview_w = (preview_h as f32 * aspect_w / aspect_h).round() as i32;
+        if preview_w > page.width {
+            preview_w = page.width;
+            preview_h = (preview_w as f32 * aspect_h / aspect_w).round() as i32;
+        }
+        let band = page.row(preview_h, gap);
+        chrome.preview = RECT {
+            left: band.left + (page.width - preview_w) / 2,
+            right: band.left + (page.width - preview_w) / 2 + preview_w,
+            ..band
+        };
 
         // The two-column row: the screens on the left, colour on the right.
         let screens = s.session.screens().len() as i32;
-        let displays_h = card_pad * 2 + heading + caption + screens.max(1) * row;
+        let monitor_row = px(metric::MONITOR_ROW);
+        let displays_h = card_pad * 2 + heading + caption + screens.max(1) * monitor_row;
         let colour_h = card_pad * 2
             + heading
             + px(metric::CHIP_H)
@@ -1205,7 +1283,7 @@ fn layout(hwnd: HWND, state: &RefCell<State>) {
             role: Role::Caption,
         });
         for control in s.controls.iter().filter(|c| c.kind == Kind::Monitor) {
-            moves.push((control.hwnd, column.row(row, 0)));
+            moves.push((control.hwnd, column.row(monitor_row, 0)));
         }
 
         // Colour.
@@ -1424,11 +1502,11 @@ fn draw_item(state: &RefCell<State>, item: &DRAWITEMSTRUCT) {
     match control.kind {
         Kind::Swatch(color) => draw_swatch(&s, &face, color, s.aimed_color() == color),
         Kind::Push { accent } => draw_push(&s, &face, &control.label, accent),
-        Kind::Check => draw_check(&s, &face, &control.label, s.checked(control.id), None),
+        Kind::Check => draw_check(&s, &face, control, s.checked(control.id), None),
         Kind::Monitor => draw_check(
             &s,
             &face,
-            &control.label,
+            control,
             s.checked(control.id),
             Some(s.monitor_swatch(control.id)),
         ),
@@ -1486,8 +1564,9 @@ fn draw_push(s: &State, face: &Face, label: &str, accent: bool) {
 }
 
 /// A checkbox, and for a monitor row the screen's colour beside it.
-fn draw_check(s: &State, face: &Face, label: &str, checked: bool, swatch: Option<Rgba>) {
+fn draw_check(s: &State, face: &Face, control: &Control, checked: bool, swatch: Option<Rgba>) {
     let Face { dc, rect, hot, pressed, .. } = *face;
+    let label = control.label.as_str();
     let size = s.px(metric::CHECKBOX);
     let middle = (rect.top + rect.bottom) / 2;
     let box_rect = RECT {
@@ -1536,14 +1615,34 @@ fn draw_check(s: &State, face: &Face, label: &str, checked: bool, swatch: Option
         round_rect(dc, chip_rect, s.px(RADIUS_CONTROL), Some(color), Some(edge));
         label_rect.right = chip_rect.left - s.px(8.0);
     }
-    text(
-        dc,
-        label_rect,
-        label,
-        s.fonts.body,
-        s.palette.text,
-        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-    );
+    if control.detail.is_empty() {
+        text(
+            dc,
+            label_rect,
+            label,
+            s.fonts.body,
+            s.palette.text,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+        );
+    } else {
+        // Two lines: what the screen is, and where it is plugged in.
+        text(
+            dc,
+            RECT { bottom: middle, ..label_rect },
+            label,
+            s.fonts.body,
+            s.palette.text,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+        );
+        text(
+            dc,
+            RECT { top: middle, ..label_rect },
+            &control.detail,
+            s.fonts.caption,
+            s.palette.text_secondary,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
+        );
+    }
 
     if face.focused {
         focus_ring(dc, rect, radius, &s.palette, face.surface);
@@ -1884,5 +1983,8 @@ fn aim(hwnd: HWND, state: &RefCell<State>) {
             s.session.screens().get((row - 1) as usize).map(|m| m.key.clone())
         };
     }
+    // Laid out again, not merely repainted: the preview is the shape of the
+    // screen it is aimed at, so aiming it somewhere else resizes it.
+    layout(hwnd, state);
     refresh(hwnd);
 }

@@ -185,11 +185,28 @@ jobs:
           RUSTFLAGS: -D warnings -C target-feature=+crt-static
 
       # Proof that the thing actually runs on a machine that never built it.
+      #
+      # Every call is waited on and its output read. The executable is a
+      # windowed program -- so that double-clicking it does not open a
+      # terminal -- and a shell does not wait for one of those: run plainly,
+      # these three would report success without having printed anything.
       - name: Smoke test
+        shell: pwsh
         run: |
-          .\target\release\whitescreen.exe --version
-          .\target\release\whitescreen.exe --help
-          .\target\release\whitescreen.exe --list-monitors --json
+          $exe = '.\target\release\whitescreen.exe'
+          function Check([string] $flags, [string] $expect) {
+            $out = New-TemporaryFile
+            $run = Start-Process -FilePath $exe -ArgumentList $flags -Wait -PassThru `
+                     -NoNewWindow -RedirectStandardOutput $out
+            if ($run.ExitCode -ne 0) { throw "$flags exited $($run.ExitCode)" }
+            $text = Get-Content $out -Raw
+            Write-Host $text
+            if ($text -notmatch $expect) { throw "$flags did not print $expect" }
+            Remove-Item $out
+          }
+          Check '--version' 'whitescreen'
+          Check '--help' 'Usage'
+          Check '--list-monitors --json' '\['
 
       - name: Package
         run: |

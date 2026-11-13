@@ -32,6 +32,8 @@ pub mod config;
 #[cfg(windows)]
 mod badge;
 #[cfg(windows)]
+mod console;
+#[cfg(windows)]
 mod icon;
 #[cfg(windows)]
 mod message;
@@ -52,6 +54,8 @@ mod window;
 
 #[cfg(windows)]
 pub use badge::Badge;
+#[cfg(windows)]
+pub use console::attach as attach_console;
 #[cfg(windows)]
 pub use message::{pump, pump_dialog};
 #[cfg(windows)]

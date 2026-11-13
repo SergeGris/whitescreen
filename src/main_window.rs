@@ -1,4 +1,4 @@
-use std::{cell::Cell, cell::RefCell, collections::HashSet};
+use std::{cell::Cell, cell::RefCell};
 
 use adw::{prelude::*, subclass::prelude::*};
 use gtk::{gdk, gio, glib};
@@ -148,30 +148,13 @@ pub fn monitor_keys(mons: &[gdk::Monitor]) -> Vec<String> {
     dedup_idents(mons.iter().map(monitor_ident))
 }
 
-/// Give every identity in a list a unique key, appending an occurrence number
-/// to repeats. The first occurrence keeps the bare identity, so the ordinary
-/// case -- every monitor reporting a connector name -- yields exactly the
-/// connector names.
+/// Give every identity in a list a unique key.
 ///
-/// Split out from `monitor_keys()` because it is the only part of monitor
-/// identity that can be tested without a display connection.
+/// The arithmetic is `listing::unique`, in the core: the Windows build has
+/// the same problem with the names it shows for two identical monitors, and
+/// these keys end up in a settings file, so the two must not drift.
 fn dedup_idents(idents: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut used: HashSet<String> = HashSet::new();
-    idents
-        .into_iter()
-        .map(|base| {
-            if used.insert(base.clone()) {
-                return base;
-            }
-            // Climb until the suffix is free rather than trusting a per-identity
-            // counter: an EDID string that itself ends in "#2" would otherwise
-            // be handed the key generated for a duplicate of the bare name.
-            (2..)
-                .map(|n| format!("{base}#{n}"))
-                .find(|cand| used.insert(cand.clone()))
-                .expect("an unbounded range always yields an unused suffix")
-        })
-        .collect()
+    whitescreen_core::listing::unique(idents)
 }
 
 mod imp {

@@ -1,3 +1,4 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 //! The portable Windows build.
 //!
 //! One executable, no installer, no registry and nothing written anywhere:
@@ -25,7 +26,11 @@ fn main() {
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    use whitescreen_win::{ControlWindow, Session, VERSION, cli, monitors};
+    use whitescreen_win::{ControlWindow, Session, VERSION, attach_console, cli, monitors};
+
+    // Printing comes before anything is parsed: a usage error has to reach
+    // whoever typed it, and a windowed program has to ask for a console.
+    attach_console();
 
     // Whether anything was asked for at all. `whitescreen.exe` on its own
     // opens the window; any flag means the caller wants the thing it names.

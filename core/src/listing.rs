@@ -33,6 +33,38 @@ pub struct Screen<'a> {
     pub primary: Option<bool>,
 }
 
+/// Give every name in a list a unique form, numbering repeats from the
+/// second: two monitors reporting "DELL U2415" become "DELL U2415" and
+/// "DELL U2415#2".
+///
+/// Both builds need it, for different reasons that come to the same
+/// arithmetic. On Wayland a monitor may report no connector name at all and
+/// is then keyed by its EDID text, which two identical screens share; on
+/// Windows the device name is unique but the name shown to a person is not,
+/// and a list offering "DELL U2415" twice is a list you cannot choose from.
+///
+/// The first occurrence keeps the bare name, so the ordinary case -- every
+/// screen distinguishable -- comes out untouched.
+pub fn unique(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    names
+        .into_iter()
+        .map(|base| {
+            if used.insert(base.clone()) {
+                return base;
+            }
+            // Climb until the suffix is free rather than trusting a
+            // per-name counter: a monitor whose own name ends in "#2" would
+            // otherwise be handed the name generated for a duplicate of the
+            // bare one.
+            (2..)
+                .map(|n| format!("{base}#{n}"))
+                .find(|candidate| used.insert(candidate.clone()))
+                .expect("an unbounded range always yields an unused suffix")
+        })
+        .collect()
+}
+
 /// The plain listing: one screen a line, name first so it can be cut out.
 pub fn plain(screens: &[Screen]) -> String {
     let mut out = String::new();
@@ -102,10 +134,7 @@ mod tests {
 
     #[test]
     fn the_plain_listing_is_a_name_and_a_size_a_line() {
-        assert_eq!(
-            plain(&screens()),
-            "DP-1\t1920 × 1200\n\\\\.\\DISPLAY2\t2560 × 1440\n",
-        );
+        assert_eq!(plain(&screens()), "DP-1\t1920 × 1200\n\\\\.\\DISPLAY2\t2560 × 1440\n",);
     }
 
     /// The exact bytes, because something is parsing them.
@@ -122,6 +151,33 @@ mod tests {
                 "]\n",
             ),
         );
+    }
+
+    #[test]
+    fn distinct_names_are_left_alone() {
+        let names = ["DP-1", "HDMI-A-1", "eDP-1"].map(String::from);
+        assert_eq!(unique(names.clone()), names.to_vec());
+    }
+
+    #[test]
+    fn duplicates_are_numbered_from_the_second() {
+        let names = ["DELL U2415", "DELL U2415", "DELL U2415"].map(String::from);
+        assert_eq!(unique(names), ["DELL U2415", "DELL U2415#2", "DELL U2415#3"]);
+    }
+
+    #[test]
+    fn a_name_shaped_like_a_generated_one_still_gets_a_unique_name() {
+        // The second "A" wants "A#2", which is taken, so it climbs.
+        let names = ["A", "A#2", "A"].map(String::from);
+        assert_eq!(unique(names), ["A", "A#2", "A#3"]);
+    }
+
+    #[test]
+    fn names_are_always_unique() {
+        let names = ["", "", "x", "x", "x#2", ""].map(String::from);
+        let out = unique(names);
+        let set: std::collections::HashSet<&String> = out.iter().collect();
+        assert_eq!(set.len(), out.len(), "every name differs: {out:?}");
     }
 
     #[test]
