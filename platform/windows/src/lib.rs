@@ -40,6 +40,8 @@ mod paint;
 #[cfg(windows)]
 mod session;
 #[cfg(windows)]
+mod window;
+#[cfg(windows)]
 mod power;
 
 #[cfg(windows)]
@@ -54,6 +56,8 @@ pub use overlay::{Overlay, OverlayEvent};
 pub use power::KeepAwake;
 #[cfg(windows)]
 pub use session::Session;
+#[cfg(windows)]
+pub use window::ControlWindow;
 
 /// Printed by `--version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

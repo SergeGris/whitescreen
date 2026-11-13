@@ -138,17 +138,35 @@ cargo test -p whitescreen-core             # anywhere
 | Saved settings | `~/.config/…/settings.ini` | `whitescreen.ini` beside the exe |
 | Translations | ✓ | — |
 | One instance, `--hide` from a keybind | ✓ | — |
-| Control window | ✓ | — |
+| Control window | ✓ | partial — see below |
 
 The settings *format* is one implementation in `whitescreen-core`, right down
 to how a backslash is escaped, so a profile written by one build is read by
 the other. Only the location differs, because the Windows build is portable.
 
-> **Not done yet:** the control window, and with it the two things that need
-> it — translations (nothing on Windows yet shows a translatable string) and
-> a running instance for `--hide` to talk to. Everything the overlays do is
-> there; what is missing is the GUI to drive them from, so on Windows the
-> command line is the whole interface.
+#### The Windows control window
+
+`whitescreen.exe` with no arguments opens a native Win32 window: the
+preview, the color chips, the key-light temperatures, Custom (through the
+system color picker), brightness, **Applies to**, the monitor list, the four
+fill modes, Cycle, Identify, and Show / Hide. Anything it changes goes
+through the same `Session` the command line drives, so the two cannot
+disagree.
+
+It is **not finished**, and these are the parts still missing against the
+GTK window:
+
+- the cycle queue strip — the queue plays, and `--queue` sets it, but there
+  is no UI to edit the steps
+- the interval and auto-hide controls (`--interval` and `--auto-hide` work)
+- the region side buttons and the second-color picker (`--region` and
+  `--second-color` work)
+- per-monitor color swatches in the sidebar, so the card can only be aimed
+  from **Applies to**, not by clicking a monitor
+- section headings, the "keeps a color of its own" hint, and translations
+
+> **Also still Linux-only:** one running instance, which is what `--hide`
+> from a keybind talks to.
 
 ## Building
 

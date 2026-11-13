@@ -75,7 +75,18 @@ pub struct Session {
     identify: bool,
 
     cycle: Option<Cycle>,
+    /// The queue and the dwell, kept even while the cycle is disarmed, so
+    /// that arming it again picks up what was there.
+    saved_queue: Vec<Rgba>,
+    saved_interval: f64,
+    /// Minutes before the overlays take themselves down, and when that is.
+    /// The delay outlives any one showing, so that hiding and showing again
+    /// starts the countdown afresh rather than losing it.
+    auto_hide: Option<u32>,
     deadline: Option<Instant>,
+    /// Whether the overlays are meant to be up. Distinct from whether any
+    /// exist: with no monitor selected there is nothing to create.
+    showing: bool,
 
     screens: Vec<Monitor>,
     overlays: Vec<(String, Overlay)>,
@@ -175,7 +186,11 @@ impl Session {
             patterns: opts.monitors.clone(),
             identify: opts.identify,
             cycle,
-            deadline: auto_hide.map(|m| Instant::now() + Duration::from_secs(u64::from(m) * 60)),
+            saved_queue: queue,
+            saved_interval: interval.clamp(crate::cli::INTERVAL_MIN, crate::cli::INTERVAL_MAX),
+            auto_hide,
+            deadline: None,
+            showing: false,
             screens,
             overlays: Vec::new(),
             badges: Vec::new(),
@@ -195,24 +210,67 @@ impl Session {
         (hits.into_iter().cloned().collect(), unmatched)
     }
 
-    /// Cover the chosen screens and run until something takes them down.
-    pub fn run(&mut self) -> windows::core::Result<()> {
+    /// Cover the chosen screens.
+    pub fn show(&mut self) -> windows::core::Result<()> {
+        self.showing = true;
         self.rebuild()?;
+        if let Some(minutes) = self.auto_hide {
+            self.deadline = Some(Instant::now() + Duration::from_secs(u64::from(minutes) * 60));
+        }
+        Ok(())
+    }
+
+    /// Take them all down. The setup is kept, so showing again is one call.
+    pub fn hide(&mut self) {
+        self.showing = false;
+        self.deadline = None;
+        self.overlays.clear();
+        self.badges.clear();
+    }
+
+    pub fn is_showing(&self) -> bool {
+        !self.overlays.is_empty()
+    }
+
+    /// One pass: deliver what the overlays saw, move the queue on, notice a
+    /// hot-plug. False once there is nothing left on screen.
+    ///
+    /// Split from the loop so that both callers can drive it -- the
+    /// command-line run below, and the control window, which has a message
+    /// loop of its own.
+    pub fn tick(&mut self) -> windows::core::Result<bool> {
+        if !self.showing {
+            return Ok(false);
+        }
+        if self.drain_events() {
+            self.hide();
+            return Ok(false);
+        }
+        self.tick_cycle();
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+            self.hide();
+            return Ok(false);
+        }
+        if self.last_scan.elapsed() >= RESCAN_EVERY {
+            self.last_scan = Instant::now();
+            self.rescan()?;
+        }
+        Ok(true)
+    }
+
+    /// Cover the chosen screens and run until something takes them down.
+    ///
+    /// What a command-line invocation does: no window, nothing to come back
+    /// to, so the process ends with the colour.
+    pub fn run(&mut self) -> windows::core::Result<()> {
+        self.show()?;
         if self.overlays.is_empty() {
             return Ok(());
         }
 
         while crate::pump() {
-            if self.drain_events() {
+            if !self.tick()? {
                 break;
-            }
-            self.tick_cycle();
-            if self.deadline.is_some_and(|d| Instant::now() >= d) {
-                break;
-            }
-            if self.last_scan.elapsed() >= RESCAN_EVERY {
-                self.last_scan = Instant::now();
-                self.rescan()?;
             }
             std::thread::sleep(IDLE);
         }
@@ -305,6 +363,160 @@ impl Session {
         let Some(color) = cycle.steps.advance() else { return };
         self.shared = color;
         self.apply_colors();
+    }
+
+    // ── What the control window drives ───────────────────────────────────
+
+    /// The colour the chips set: what every monitor without one of its own
+    /// shows.
+    pub fn shared_color(&self) -> Rgba {
+        self.shared
+    }
+
+    pub fn set_shared_color(&mut self, color: Rgba) {
+        self.shared = color;
+        self.apply_colors();
+    }
+
+    /// Give one monitor a colour of its own, switching the mode on -- asking
+    /// for a per-monitor colour is asking for per-monitor colours.
+    pub fn set_monitor_color(&mut self, key: &str, color: Rgba) {
+        self.per_monitor.insert(key.to_string(), color);
+        self.per_monitor_on = true;
+        self.apply_colors();
+    }
+
+    /// The colour a monitor has been given, if any.
+    pub fn monitor_color(&self, key: &str) -> Option<Rgba> {
+        self.per_monitor.get(key).copied()
+    }
+
+    pub fn per_monitor_colors(&self) -> bool {
+        self.per_monitor_on
+    }
+
+    pub fn set_per_monitor_colors(&mut self, on: bool) {
+        self.per_monitor_on = on;
+        self.apply_colors();
+    }
+
+    pub fn brightness(&self) -> f32 {
+        self.brightness
+    }
+
+    pub fn set_brightness(&mut self, fraction: f32) {
+        self.brightness = fraction.clamp(0.05, 1.0);
+        self.apply_colors();
+    }
+
+    pub fn fill(&self) -> Fill {
+        self.fill
+    }
+
+    pub fn set_fill(&mut self, fill: Fill) {
+        self.fill = fill;
+        for (_, overlay) in &self.overlays {
+            overlay.set_fill(fill);
+        }
+    }
+
+    pub fn auto_hide(&self) -> Option<u32> {
+        self.auto_hide
+    }
+
+    pub fn set_auto_hide(&mut self, minutes: Option<u32>) {
+        self.auto_hide = minutes.filter(|m| *m > 0);
+        // Changing the delay restarts the countdown rather than leaving a
+        // timer running against the number that was there before.
+        self.deadline = match (self.showing, self.auto_hide) {
+            (true, Some(m)) => Some(Instant::now() + Duration::from_secs(u64::from(m) * 60)),
+            _ => None,
+        };
+    }
+
+    pub fn identify(&self) -> bool {
+        self.identify
+    }
+
+    pub fn set_identify(&mut self, on: bool) -> windows::core::Result<()> {
+        self.identify = on;
+        if !self.identify {
+            self.badges.clear();
+        } else if self.showing {
+            self.rebuild()?;
+        }
+        Ok(())
+    }
+
+    /// Which monitors the overlays cover, by key. Empty means all of them.
+    pub fn selection(&self) -> &[String] {
+        &self.patterns
+    }
+
+    pub fn set_selection(&mut self, keys: Vec<String>) -> windows::core::Result<()> {
+        self.patterns = keys;
+        if self.showing {
+            self.rebuild()?;
+        }
+        Ok(())
+    }
+
+    /// Every attached screen, as last read.
+    pub fn screens(&self) -> &[Monitor] {
+        &self.screens
+    }
+
+    /// Whether the queue is armed, and the queue itself.
+    pub fn cycle_armed(&self) -> bool {
+        self.cycle.is_some()
+    }
+
+    pub fn queue_colors(&self) -> Vec<Rgba> {
+        self.cycle.as_ref().map_or_else(|| self.saved_queue.clone(), |c| c.steps.colors().to_vec())
+    }
+
+    pub fn interval(&self) -> f64 {
+        self.cycle.as_ref().map_or(self.saved_interval, |c| c.interval.as_secs_f64())
+    }
+
+    pub fn set_interval(&mut self, secs: f64) {
+        let secs = secs.clamp(crate::cli::INTERVAL_MIN, crate::cli::INTERVAL_MAX);
+        self.saved_interval = secs;
+        if let Some(cycle) = &mut self.cycle {
+            cycle.interval = Duration::from_secs_f64(secs);
+            cycle.next_at = Instant::now() + cycle.interval;
+        }
+    }
+
+    pub fn set_queue_colors(&mut self, colors: &[Rgba]) {
+        if colors.is_empty() {
+            return;
+        }
+        self.saved_queue = colors.to_vec();
+        if let Some(cycle) = &mut self.cycle {
+            cycle.steps.set_colors(colors);
+        }
+    }
+
+    /// Arm or disarm the cycle. Arming does not start anything on its own:
+    /// the queue plays onto the screens, so it runs while they are covered
+    /// and not before -- the same rule as the GTK build.
+    pub fn set_cycle_armed(&mut self, armed: bool) {
+        if armed == self.cycle.is_some() {
+            return;
+        }
+        if armed {
+            let mut steps = Steps::default();
+            steps.set_colors(&self.saved_queue);
+            self.cycle = Some(Cycle {
+                steps,
+                interval: Duration::from_secs_f64(self.saved_interval),
+                next_at: Instant::now() + Duration::from_secs_f64(self.saved_interval),
+                paused: false,
+            });
+        } else {
+            self.cycle = None;
+        }
     }
 
     /// What one monitor should show: its own colour if it has one and the

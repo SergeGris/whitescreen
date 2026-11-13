@@ -22,7 +22,11 @@ fn main() {
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
     use whitescreen_core::text::json_string;
-    use whitescreen_win::{Session, VERSION, cli, monitors};
+    use whitescreen_win::{ControlWindow, Session, VERSION, cli, monitors};
+
+    // Whether anything was asked for at all. `whitescreen.exe` on its own
+    // opens the window; any flag means the caller wants the thing it names.
+    let bare = std::env::args().len() <= 1;
 
     let opts = match cli::parse(std::env::args().skip(1)) {
         Ok(opts) => opts,
@@ -56,6 +60,19 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+
+    // A bare invocation is "show me the app"; one that puts something on the
+    // screens does that and nothing else, so a keybind gets the colour and
+    // not a control panel. The same rule as the GTK build.
+    if bare {
+        return match ControlWindow::new(session).and_then(|w| w.run()) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("whitescreen: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
 
     let (chosen, unmatched) = session.chosen();
     for pattern in &unmatched {
