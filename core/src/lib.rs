@@ -12,6 +12,7 @@
 
 pub mod glob;
 pub mod ini;
+pub mod listing;
 pub mod queue;
 pub mod settings;
 pub mod kelvin;
@@ -21,7 +22,7 @@ mod fill;
 mod rgba;
 
 pub use fill::{
-    Fill, GRID_PITCH, NOISE_BLOCK, NOISE_CELL, NOISE_SEED, Rect, Side, WEDGE_BANDS, next_noise_seed,
-    wedge_band, wedge_level,
+    Fill, GRID_PITCH, NOISE_BLOCK, NOISE_CELL, NOISE_SEED, Pattern, Rect, Side, WEDGE_BANDS,
+    next_noise_seed, wedge_band, wedge_level,
 };
 pub use rgba::Rgba;

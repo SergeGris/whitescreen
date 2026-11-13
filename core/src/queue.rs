@@ -29,6 +29,29 @@ pub const DEFAULT: &[Rgba] = &[
 /// of shape.
 pub const MAX_LEN: usize = 16;
 
+/// Interval bounds, in seconds.
+///
+/// The floor is deliberate rather than a round number: a full-screen colour
+/// changing faster than twice a second approaches the flash rate that
+/// photosensitive-epilepsy guidance warns about. It is a safety limit, which
+/// is reason enough for both front ends to read it from one place instead of
+/// each declaring its own copy.
+pub const INTERVAL_MIN: f64 = 0.5;
+pub const INTERVAL_MAX: f64 = 60.0;
+/// What the window's spinner moves by.
+pub const INTERVAL_STEP: f64 = 0.5;
+pub const INTERVAL_DEFAULT: f64 = 2.0;
+
+/// Bring a requested interval inside the bounds.
+///
+/// Anything that is not a number at all becomes the default. `f64::clamp`
+/// passes a NaN straight through, and an interval of NaN is worse than a bad
+/// one: every comparison against it is false, so the queue would simply
+/// never advance.
+pub fn clamp_interval(secs: f64) -> f64 {
+    if secs.is_nan() { INTERVAL_DEFAULT } else { secs.clamp(INTERVAL_MIN, INTERVAL_MAX) }
+}
+
 /// The list of colours and the position in it, with no widget attached.
 ///
 /// Split out from the widget because this is the part with the awkward
@@ -213,6 +236,23 @@ impl Steps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_interval_is_clamped_to_the_bounds() {
+        assert_eq!(clamp_interval(2.0), 2.0);
+        assert_eq!(clamp_interval(0.1), INTERVAL_MIN);
+        assert_eq!(clamp_interval(600.0), INTERVAL_MAX);
+        assert_eq!(clamp_interval(-1.0), INTERVAL_MIN);
+    }
+
+    #[test]
+    fn an_interval_that_is_not_a_number_becomes_the_default() {
+        // A NaN would otherwise survive the clamp and stop the queue dead:
+        // nothing is ever >= it, so no step would ever be due.
+        assert_eq!(clamp_interval(f64::NAN), INTERVAL_DEFAULT);
+        assert_eq!(clamp_interval(f64::INFINITY), INTERVAL_MAX);
+        assert_eq!(clamp_interval(f64::NEG_INFINITY), INTERVAL_MIN);
+    }
 
     const CYAN: Rgba = Rgba::new(0, 255, 255);
 

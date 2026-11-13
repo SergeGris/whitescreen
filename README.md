@@ -51,7 +51,7 @@ The repository is a workspace of three crates:
 | Crate | What it is |
 | ----- | ---------- |
 | `whitescreen` (root) | the GTK 4 application — everything described above |
-| `core/` → `whitescreen-core` | what the app knows that is not about a toolkit: colours, the geometry of every fill, color temperature, monitor-name matching, placeholder substitution. No dependencies at all, and no display needed to test it. |
+| `core/` → `whitescreen-core` | what the app knows that is not about a toolkit: colours, the five pattern modes and their names, the geometry of every fill, color temperature, the cycle queue and its interval bounds, monitor-name matching, the settings file, the shape of `--list-monitors`, placeholder substitution. No dependencies at all, and no display needed to test it. |
 | `platform/windows/` → `whitescreen-win` | the native Win32 front end |
 
 Windows has no `wlr-layer-shell`, and does not need one: a borderless
@@ -83,6 +83,19 @@ What keeps the two front ends honest is that neither owns the answers. The
 bands of a wedge, the halves of a region, the color of a 3200 K key light and
 the `--monitor` matcher all live in `whitescreen-core` and are tested there,
 so a fix to the wedge's seam arithmetic cannot land on one platform only.
+
+That is a rule the tree is still being brought round to, and every time a
+piece moves it turns out the two copies had already drifted. The five
+pattern modes were defined three times over, and the Windows copy could not
+tell a flat color from a region covering the whole screen, so its Region
+button sat lit on a fresh profile. The cycle interval's floor — a safety
+limit, not a preference — was written out twice. `--list-monitors --json`
+was built by hand on each side, and the Windows one had grown a `primary`
+field the GTK one never printed. All three are now one implementation with
+the format pinned by tests, which is also why `primary` is in the JSON on
+both platforms: it reads `null` on Wayland, where GDK 4 removed the
+question, rather than being absent on one platform and present on the
+other.
 
 ### Portable
 

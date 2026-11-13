@@ -9,7 +9,7 @@
 //! to drive: `--cycle` needs a queue to play and `--hide` needs an instance
 //! already running.
 
-use whitescreen_core::{Fill, Rgba, Side, queue};
+use whitescreen_core::{Fill, Pattern, Rgba, Side, queue};
 
 /// What one invocation asks for.
 #[derive(Clone, PartialEq, Debug)]
@@ -36,12 +36,10 @@ pub struct Options {
     pub action: Action,
 }
 
-/// Interval bounds, in seconds, as in the GTK build: the floor is
-/// deliberate, because a full-screen colour flashing faster than that
-/// approaches the rate photosensitive-epilepsy guidance warns about.
-pub const INTERVAL_MIN: f64 = 0.5;
-pub const INTERVAL_MAX: f64 = 60.0;
-pub const INTERVAL_DEFAULT: f64 = 2.0;
+/// Interval bounds, in seconds. One copy, in the core, because the GTK
+/// build's spinner offers exactly this range and the floor of it is a
+/// safety limit rather than a preference.
+pub use whitescreen_core::queue::{INTERVAL_DEFAULT, INTERVAL_MAX, INTERVAL_MIN};
 
 /// What to do, once the options are understood.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,21 +142,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
             }
             "-p" | "--pattern" => {
                 let v = value("--pattern")?;
-                opts.fill = match v.as_str() {
-                    "flat" => Fill::Region { side: Side::Full, rest: None },
-                    "region" => {
-                        region_asked = true;
-                        Fill::Region { side: Side::Full, rest: None }
-                    }
-                    "exerciser" => Fill::Noise,
-                    "wedge" => Fill::Wedge,
-                    "grid" => Fill::Grid,
-                    _ => {
-                        return Err(format!(
-                            "not a pattern: {v} (flat, region, exerciser, wedge, grid)"
-                        ));
-                    }
-                };
+                let pattern = Pattern::from_key(&v).ok_or_else(|| {
+                    format!("not a pattern: {v} (flat, region, exerciser, wedge, grid)")
+                })?;
+                // Naming the region mode is asking for the region details,
+                // which the loop may not have read yet; the fill is settled
+                // once every argument is in.
+                region_asked |= pattern == Pattern::Region;
+                opts.fill = pattern.fill(Side::Full, None);
             }
             "-r" | "--region" => {
                 let v = value("--region")?;
@@ -198,7 +189,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
                 let secs: f64 = v.parse().map_err(|_| format!("not a number: {v}"))?;
                 // Clamped rather than refused, as the GTK build clamps it to
                 // what its spinner offers.
-                opts.interval = secs.clamp(INTERVAL_MIN, INTERVAL_MAX);
+                opts.interval = queue::clamp_interval(secs);
             }
             "-q" | "--queue" => {
                 let v = value("--queue")?;
@@ -390,6 +381,9 @@ mod parity_tests {
         assert_eq!(parse_args(&["-i", "0.1"]).unwrap().interval, INTERVAL_MIN);
         assert_eq!(parse_args(&["-i", "600"]).unwrap().interval, INTERVAL_MAX);
         assert_eq!(parse_args(&[]).unwrap().interval, INTERVAL_DEFAULT);
+        // "nan" parses as a number and used to survive the clamp, which
+        // stopped the queue dead: nothing is ever due after a NaN deadline.
+        assert_eq!(parse_args(&["-i", "nan"]).unwrap().interval, INTERVAL_DEFAULT);
     }
 
     #[test]

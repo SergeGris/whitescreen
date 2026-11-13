@@ -8,7 +8,7 @@ use gtk::gio::prelude::ApplicationCommandLineExt;
 use gtk::{gdk, gio, glib};
 
 use crate::i18n::{gettext, mark};
-use whitescreen_core::text;
+use whitescreen_core::listing;
 
 mod color;
 mod color_button;
@@ -178,35 +178,31 @@ fn list_monitors(cmd: &gio::ApplicationCommandLine, as_json: bool) {
         .collect();
     let keys = main_window::monitor_keys(&monitors);
 
-    if !as_json {
-        for (key, mon) in keys.iter().zip(&monitors) {
+    // The models have to outlive the rows that borrow them.
+    let models: Vec<String> =
+        monitors.iter().map(|m| m.model().map(|s| s.to_string()).unwrap_or_default()).collect();
+    let rows: Vec<listing::Screen> = keys
+        .iter()
+        .zip(&monitors)
+        .zip(&models)
+        .map(|((key, mon), model)| {
             let geo = mon.geometry();
-            cmd.print_literal(&format!("{key}\t{} × {}\n", geo.width(), geo.height()));
-        }
-        return;
-    }
+            listing::Screen {
+                key,
+                model,
+                width: geo.width(),
+                height: geo.height(),
+                scale: mon.scale(),
+                refresh_mhz: i64::from(mon.refresh_rate()),
+                // GDK 4 removed the question, so on Wayland nobody knows.
+                primary: None,
+            }
+        })
+        .collect();
 
-    // Hand-rolled rather than pulling in a serializer for four fields. The
-    // only values that are not numbers are the key and the model, and both
-    // come from the compositor, so both are escaped.
-    let mut out = String::from("[\n");
-    for (i, (key, mon)) in keys.iter().zip(&monitors).enumerate() {
-        let geo = mon.geometry();
-        let model = mon.model().map(|s| s.to_string()).unwrap_or_default();
-        let comma = if i + 1 < keys.len() { "," } else { "" };
-        out.push_str(&format!(
-            "  {{\"name\": {}, \"width\": {}, \"height\": {}, \
-             \"scale\": {}, \"refresh_mhz\": {}, \"model\": {}}}{comma}\n",
-            text::json_string(key),
-            geo.width(),
-            geo.height(),
-            mon.scale(),
-            mon.refresh_rate(),
-            text::json_string(&model),
-        ));
-    }
-    out.push_str("]\n");
-    cmd.print_literal(&out);
+    // The shape is the core's, not this file's: both builds promise the
+    // same output, so neither of them writes it.
+    cmd.print_literal(&if as_json { listing::json(&rows) } else { listing::plain(&rows) });
 }
 
 /// Options that configure or act on the app, as opposed to `--version` and

@@ -19,14 +19,13 @@ use crate::cycle_queue::CycleQueue;
 use crate::tile;
 use crate::i18n::gettext;
 
-/// Interval bounds, in seconds. The floor is 0.5 s deliberately: a full-screen
-/// colour flashing faster than that starts to approach the rate that
-/// photosensitive-epilepsy guidance warns about, and no dead-pixel check
-/// needs it.
-const MIN:     f64 = 0.5;
-const MAX:     f64 = 60.0;
-const STEP:    f64 = 0.5;
-const DEFAULT: f64 = 2.0;
+/// Interval bounds, in seconds, and the step the spinner moves by. In the
+/// core because the Windows build clamps `--interval` to the same range, and
+/// the floor of it is a safety limit rather than a preference: see
+/// `queue::INTERVAL_MIN`.
+use whitescreen_core::queue::{
+    INTERVAL_DEFAULT as DEFAULT, INTERVAL_MAX as MAX, INTERVAL_MIN as MIN, INTERVAL_STEP as STEP,
+};
 
 /// Fewer steps than this is not a cycle, so the switch stays insensitive.
 const MIN_STEPS: usize = 2;

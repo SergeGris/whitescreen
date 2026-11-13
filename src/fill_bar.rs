@@ -33,41 +33,12 @@ const SIDES: &[(Side, &str, &str)] = &[
 
 /// Which fill mode is on.
 ///
-/// `Flat` is all of them off -- the whole screen in one colour, which is the
-/// state the app starts in and the one everything else is a departure from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Mode {
-    #[default]
-    Flat,
-    Region,
-    Exerciser,
-    Wedge,
-    Grid,
-}
-
-impl Mode {
-    /// Every mode, `Flat` first. `Flat` is the only one with no button of its
-    /// own, being every other one turned off.
-    pub const ALL: &'static [Mode] =
-        &[Mode::Flat, Mode::Region, Mode::Exerciser, Mode::Wedge, Mode::Grid];
-
-    /// The name `--pattern` accepts and the settings file stores. Kept
-    /// separate from the button label so that renaming the one visible to the
-    /// user cannot silently invalidate everybody's saved settings.
-    pub fn as_key(self) -> &'static str {
-        match self {
-            Self::Flat      => "flat",
-            Self::Region    => "region",
-            Self::Exerciser => "exerciser",
-            Self::Wedge     => "wedge",
-            Self::Grid      => "grid",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|m| m.as_key() == key)
-    }
-}
+/// The mode itself, its name on the command line and in the settings file,
+/// and which fill it stands for all live in the core, because the Windows
+/// front end has the same five buttons and must not disagree about any of
+/// it. What stays here is the part that is a widget: the labels, the
+/// tooltips and the strip they sit in.
+pub use whitescreen_core::Pattern as Mode;
 
 mod imp {
     use super::*;
@@ -203,18 +174,10 @@ impl FillBar {
     /// What should cover a screen, given the mode now switched on.
     pub fn fill(&self) -> Fill {
         let imp = self.imp();
-        match self.mode() {
-            Mode::Flat      => Fill::default(),
-            Mode::Exerciser => Fill::Noise,
-            Mode::Wedge     => Fill::Wedge,
-            Mode::Grid      => Fill::Grid,
-            Mode::Region    => Fill::Region {
-                side: imp.side.get(),
-                // The core speaks in the colour a panel is given, not in the
-                // toolkit's floats.
-                rest: imp.use_rest.is_active().then(|| crate::color::to_core(imp.rest.rgba())),
-            },
-        }
+        // The core speaks in the colour a panel is given, not in the
+        // toolkit's floats.
+        let rest = imp.use_rest.is_active().then(|| crate::color::to_core(imp.rest.rgba()));
+        self.mode().fill(imp.side.get(), rest)
     }
 
     /// The mode now switched on, `Flat` when none is.

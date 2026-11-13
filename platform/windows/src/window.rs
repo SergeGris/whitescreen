@@ -71,7 +71,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
-use whitescreen_core::{Fill, Rgba, Side, kelvin};
+use whitescreen_core::{Fill, Pattern, Rgba, Side, kelvin};
 
 use crate::icon::Icons;
 use crate::paint::{colorref, paint};
@@ -116,13 +116,13 @@ const CHIPS: &[(&str, Rgba)] = &[
     ("Blue", Rgba::new(0, 0, 255)),
 ];
 
-/// The fill buttons, and what each one means. `Flat` has no button: it is
-/// all of them unchecked.
-const FILLS: &[(&str, Fill)] = &[
-    ("Region", Fill::Region { side: Side::Left, rest: None }),
-    ("Exerciser", Fill::Noise),
-    ("Wedge", Fill::Wedge),
-    ("Grid", Fill::Grid),
+/// The fill buttons, and the mode each one stands for. `Flat` has no button
+/// of its own: it is all of them unchecked.
+const FILLS: &[(&str, Pattern)] = &[
+    ("Region", Pattern::Region),
+    ("Exerciser", Pattern::Exerciser),
+    ("Wedge", Pattern::Wedge),
+    ("Grid", Pattern::Grid),
 ];
 
 const CLASS_NAME: PCWSTR = w!("WhiteScreenControl");
@@ -260,7 +260,7 @@ impl State {
             ID_PER_MONITOR => self.session.per_monitor_colors(),
             id if (ID_FILL_FIRST..=ID_FILL_LAST).contains(&id) => FILLS
                 .get(id - ID_FILL_FIRST)
-                .is_some_and(|(_, f)| same_kind(*f, self.session.fill())),
+                .is_some_and(|(_, pattern)| *pattern == self.session.fill().pattern()),
             id if id >= ID_MONITOR_FIRST => {
                 self.monitor_key(id).is_some_and(|key| selected(self.session.selection(), &key))
             }
@@ -626,18 +626,6 @@ fn sync_applies_to(cell: &RefCell<State>) {
     unsafe {
         SendMessageW(combo.hwnd, CB_SETCURSEL, Some(WPARAM(selected)), None);
     }
-}
-
-/// Whether two fills are the same *kind*, ignoring their details: a region
-/// is a region whichever half it covers.
-fn same_kind(a: Fill, b: Fill) -> bool {
-    matches!(
-        (a, b),
-        (Fill::Region { .. }, Fill::Region { .. })
-            | (Fill::Noise, Fill::Noise)
-            | (Fill::Wedge, Fill::Wedge)
-            | (Fill::Grid, Fill::Grid)
-    )
 }
 
 impl Drop for ControlWindow {
@@ -1777,12 +1765,24 @@ fn command(hwnd: HWND, state: &RefCell<State>, id: usize) {
                 s.session.set_per_monitor_colors(on);
             }
             id if (ID_FILL_FIRST..=ID_FILL_LAST).contains(&id) => {
-                let which = id - ID_FILL_FIRST;
-                if let Some((_, fill)) = FILLS.get(which) {
+                if let Some((_, pattern)) = FILLS.get(id - ID_FILL_FIRST) {
+                    // The region half and its second colour are the region
+                    // controls' own state: kept while another mode is on, so
+                    // that coming back to Region comes back to the same half
+                    // rather than to the default one. The command line is
+                    // the only thing that sets them for now.
+                    let (side, rest) = match s.session.fill() {
+                        Fill::Region { side, rest } if side != Side::Full => (side, rest),
+                        Fill::Region { rest, .. } => (Side::Left, rest),
+                        _ => (Side::Left, None),
+                    };
                     // Clicking the mode that is already on turns it off,
                     // which is the plain colour.
-                    let next =
-                        if same_kind(*fill, s.session.fill()) { Fill::default() } else { *fill };
+                    let next = if *pattern == s.session.fill().pattern() {
+                        Fill::default()
+                    } else {
+                        pattern.fill(side, rest)
+                    };
                     s.session.set_fill(next);
                 }
             }

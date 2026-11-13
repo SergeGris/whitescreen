@@ -12,6 +12,9 @@
 //! file falls back to the user's own profile rather than failing to save; see
 //! `config`.
 
+#[cfg(windows)]
+use whitescreen_core::listing;
+
 #[cfg(not(windows))]
 fn main() {
     // The workspace builds on Linux too, where this binary is a stub rather
@@ -22,7 +25,6 @@ fn main() {
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    use whitescreen_core::text::json_string;
     use whitescreen_win::{ControlWindow, Session, VERSION, cli, monitors};
 
     // Whether anything was asked for at all. `whitescreen.exe` on its own
@@ -48,7 +50,7 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
         cli::Action::ListMonitors { json } => {
-            list(&monitors(), json, json_string);
+            list(&monitors(), json);
             return std::process::ExitCode::SUCCESS;
         }
         cli::Action::Show => {}
@@ -107,29 +109,23 @@ fn attached() -> String {
         .join(", ")
 }
 
-/// Print the monitor list, in the same shape the GTK build prints it.
+/// Print the monitor list.
+///
+/// The shape is the core's, not this file's: both builds promise the same
+/// output, so neither of them writes it.
 #[cfg(windows)]
-fn list(screens: &[whitescreen_win::Monitor], json: bool, quote: fn(&str) -> String) {
-    if !json {
-        for m in screens {
-            println!("{}\t{} × {}", m.key, m.width, m.height);
-        }
-        return;
-    }
-    println!("[");
-    for (i, m) in screens.iter().enumerate() {
-        let comma = if i + 1 < screens.len() { "," } else { "" };
-        println!(
-            "  {{\"name\": {}, \"width\": {}, \"height\": {}, \"scale\": {}, \
-             \"refresh_mhz\": {}, \"model\": {}, \"primary\": {}}}{comma}",
-            quote(&m.key),
-            m.width,
-            m.height,
-            m.scale,
-            m.refresh_mhz,
-            quote(&m.name),
-            m.primary,
-        );
-    }
-    println!("]");
+fn list(screens: &[whitescreen_win::Monitor], json: bool) {
+    let rows: Vec<listing::Screen> = screens
+        .iter()
+        .map(|m| listing::Screen {
+            key: &m.key,
+            model: &m.name,
+            width: m.width,
+            height: m.height,
+            scale: f64::from(m.scale),
+            refresh_mhz: i64::from(m.refresh_mhz),
+            primary: Some(m.primary),
+        })
+        .collect();
+    print!("{}", if json { listing::json(&rows) } else { listing::plain(&rows) });
 }

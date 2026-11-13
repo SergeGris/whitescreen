@@ -106,6 +106,90 @@ pub enum Fill {
     Grid,
 }
 
+/// Which of the five modes covers a screen, by name rather than by geometry.
+///
+/// `Fill` says what to paint; `Pattern` says which mode that is -- the thing
+/// a button in the window stands for, `--pattern` names, and the settings
+/// file stores. Both front ends need the same answer to "which button is
+/// on", and before this they each worked it out for themselves.
+///
+/// The two are not interchangeable in one direction: a flat colour *is* the
+/// region mode covering the whole screen, so `Flat` and `Region` can mean
+/// the same `Fill`. Going the other way is settled by `Fill::pattern`, which
+/// calls a whole-screen region what the user sees: flat.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Pattern {
+    /// The whole screen in one colour: every other mode turned off, and the
+    /// state the app starts in.
+    #[default]
+    Flat,
+    /// One half of the screen, so the rest stays visible beside it.
+    Region,
+    /// A drifting block of noise, for freeing a stuck subpixel.
+    Exerciser,
+    /// A staircase from black to the colour.
+    Wedge,
+    /// Hairlines one device pixel wide.
+    Grid,
+}
+
+impl Pattern {
+    /// Every mode, `Flat` first, in the order the window offers them.
+    pub const ALL: &'static [Pattern] =
+        &[Pattern::Flat, Pattern::Region, Pattern::Exerciser, Pattern::Wedge, Pattern::Grid];
+
+    /// The name `--pattern` accepts and the settings file stores.
+    ///
+    /// Kept separate from the button label so that renaming the one visible
+    /// to the user cannot silently invalidate everybody's saved settings --
+    /// and so that a translated label cannot either.
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::Region => "region",
+            Self::Exerciser => "exerciser",
+            Self::Wedge => "wedge",
+            Self::Grid => "grid",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|p| p.as_key() == key)
+    }
+
+    /// The fill this mode means.
+    ///
+    /// `side` and `rest` are the region controls' own state, which the other
+    /// modes have no use for: they are kept while another mode is on so that
+    /// switching back comes to the same half.
+    pub fn fill(self, side: Side, rest: Option<super::Rgba>) -> Fill {
+        match self {
+            Self::Flat => Fill::default(),
+            Self::Region => Fill::Region { side, rest },
+            Self::Exerciser => Fill::Noise,
+            Self::Wedge => Fill::Wedge,
+            Self::Grid => Fill::Grid,
+        }
+    }
+}
+
+impl Fill {
+    /// Which mode this fill is, ignoring the details of it.
+    ///
+    /// A region covering the whole screen is a flat colour, whatever asked
+    /// for it: that is what the window has to show, because a Region button
+    /// lit while the screen is plainly flat is a button that lies.
+    pub fn pattern(self) -> Pattern {
+        match self {
+            Self::Region { side: Side::Full, .. } => Pattern::Flat,
+            Self::Region { .. } => Pattern::Region,
+            Self::Noise => Pattern::Exerciser,
+            Self::Wedge => Pattern::Wedge,
+            Self::Grid => Pattern::Grid,
+        }
+    }
+}
+
 impl Default for Fill {
     fn default() -> Self {
         Self::Region { side: Side::Full, rest: None }
@@ -162,6 +246,62 @@ pub fn wedge_level(i: u32, bands: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_pattern_key_round_trips() {
+        for pattern in Pattern::ALL {
+            assert_eq!(Pattern::from_key(pattern.as_key()), Some(*pattern));
+        }
+        assert_eq!(Pattern::from_key("sideways"), None);
+        // The keys are in saved settings and on the command line, so this
+        // list is a promise, not an implementation detail.
+        let keys: Vec<&str> = Pattern::ALL.iter().map(|p| p.as_key()).collect();
+        assert_eq!(keys, ["flat", "region", "exerciser", "wedge", "grid"]);
+    }
+
+    #[test]
+    fn a_full_width_region_is_a_flat_colour() {
+        // What the window has to show: a Region button lit while the screen
+        // is plainly flat is a button that lies.
+        assert_eq!(Fill::default().pattern(), Pattern::Flat);
+        assert_eq!(Fill::Region { side: Side::Full, rest: None }.pattern(), Pattern::Flat);
+        assert_eq!(
+            Fill::Region { side: Side::Full, rest: Some(crate::Rgba::new(1, 2, 3)) }.pattern(),
+            Pattern::Flat,
+        );
+        assert_eq!(Fill::Region { side: Side::Left, rest: None }.pattern(), Pattern::Region);
+    }
+
+    #[test]
+    fn a_pattern_makes_the_fill_it_names() {
+        let rest = Some(crate::Rgba::new(9, 9, 9));
+        assert_eq!(Pattern::Exerciser.fill(Side::Left, rest), Fill::Noise);
+        assert_eq!(Pattern::Wedge.fill(Side::Left, rest), Fill::Wedge);
+        assert_eq!(Pattern::Grid.fill(Side::Left, rest), Fill::Grid);
+        // Flat keeps the region controls' state without using it.
+        assert_eq!(Pattern::Flat.fill(Side::Left, rest), Fill::default());
+        assert_eq!(
+            Pattern::Region.fill(Side::Left, rest),
+            Fill::Region { side: Side::Left, rest },
+        );
+    }
+
+    #[test]
+    fn a_fill_survives_the_round_trip_through_its_pattern() {
+        for fill in [
+            Fill::default(),
+            Fill::Noise,
+            Fill::Wedge,
+            Fill::Grid,
+            Fill::Region { side: Side::Bottom, rest: None },
+        ] {
+            let (side, rest) = match fill {
+                Fill::Region { side, rest } => (side, rest),
+                _ => (Side::Full, None),
+            };
+            assert_eq!(fill.pattern().fill(side, rest), fill);
+        }
+    }
 
     /// Widths that divide the band count evenly and widths that do not, plus
     /// the awkward ones a real display can hand us.

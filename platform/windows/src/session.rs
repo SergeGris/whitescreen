@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use whitescreen_core::queue::{DEFAULT, Steps};
 use whitescreen_core::settings::Settings;
-use whitescreen_core::{Fill, Rgba, Side, glob};
+use whitescreen_core::{Fill, Pattern, Rgba, Side, glob};
 
 use crate::badge::Badge;
 use crate::cli::Options;
@@ -44,13 +44,12 @@ fn saved_fill(settings: &Settings) -> Fill {
         .as_deref()
         .and_then(Side::from_key)
         .unwrap_or(Side::Full);
-    match settings.pattern().as_deref() {
-        Some("exerciser") => Fill::Noise,
-        Some("wedge") => Fill::Wedge,
-        Some("grid") => Fill::Grid,
-        Some("region") => Fill::Region { side, rest: settings.second_color() },
-        _ => Fill::default(),
-    }
+    settings
+        .pattern()
+        .as_deref()
+        .and_then(Pattern::from_key)
+        .unwrap_or_default()
+        .fill(side, settings.second_color())
 }
 
 /// The queue, playing.
