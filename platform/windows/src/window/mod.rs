@@ -4,51 +4,37 @@
 //! colour chips, the key-light temperatures, brightness, the fill modes,
 //! the cycle and the monitor list.
 //!
-//! # Why so much of it is drawn by hand
+//! Three files: this one is the window itself -- its state, its controls,
+//! and what every message means -- while `layout` works out where things go
+//! and `draw` paints them. The reasoning for owning the pixels is in `draw`,
+//! and for computing the geometry rather than loading a dialog resource in
+//! `layout`.
 //!
-//! The controls are real `BUTTON` and `COMBOBOX` windows -- so tab, space,
-//! the focus ring and the screen reader all work the way Windows users
-//! expect -- but almost all of them are `BS_OWNERDRAW` and painted here
-//! against the Fluent palette in `theme`. A themed Win32 checkbox draws its
-//! own label in the *theme's* text colour, which is black whatever the app
-//! does, so an app that follows the system into dark mode and does not own
-//! its pixels ends up with black text on a near-black card. Owning the
-//! drawing is what makes the two themes both correct, and it is also what
-//! gets WinUI's geometry: 4 px corners on a control, 8 px on a card, a
-//! 32 px row, and the hover and pressed fills a modern Windows app has.
-//!
-//! The brightness slider is the exception that keeps its system control: a
-//! trackbar is custom-drawn through `NM_CUSTOMDRAW`, which leaves the real
-//! control -- and its keyboard handling and accessibility -- in place while
-//! the channel and thumb come out Fluent.
-//!
-//! The layout is computed rather than loaded from a dialog resource: every
-//! length here is scaled by the window's DPI, and a resource template would
-//! have had to be duplicated per scale factor.
+//! The controls are real `BUTTON` and `COMBOBOX` windows, so tab, space, the
+//! focus ring and the screen reader all work the way Windows users expect.
+//! The brightness slider is a real trackbar; only its pixels are ours.
 //!
 //! Nothing here decides anything about colour. Every control reads and
 //! writes `Session`, which is shared with the command line, so the two
 //! cannot disagree about what a button means.
 
+mod draw;
+mod layout;
+
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DT_CENTER, DT_END_ELLIPSIS,
-    DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, Ellipse, EndPaint, FillRect, GetDC,
-    HBRUSH, HDC, HFONT, InvalidateRect, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_ERASE,
-    RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectClipRgn, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT, UpdateWindow,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, HBRUSH, HDC, InvalidateRect, PAINTSTRUCT,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, SetBkMode, SetTextColor, TRANSPARENT,
+    UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
 use windows::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDIS_SELECTED, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
-    CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, ICC_BAR_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
-    InitCommonControlsEx, MEASUREITEMSTRUCT, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, ODS_COMBOBOXEDIT,
-    ODS_FOCUS, ODS_SELECTED, ODT_COMBOBOX, SetWindowTheme, TBCD_CHANNEL, TBCD_THUMB, TBCD_TICS,
-    TBM_GETTHUMBRECT, TBM_SETPOS, TBM_SETRANGE, TBS_NOTICKS, TBS_TRANSPARENTBKGND, TRACKBAR_CLASSW,
-    WM_MOUSELEAVE,
+    DRAWITEMSTRUCT, ICC_BAR_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, MEASUREITEMSTRUCT, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, SetWindowTheme,
+    TBM_SETPOS, TBM_SETRANGE, TBS_NOTICKS, TBS_TRANSPARENTBKGND, TRACKBAR_CLASSW, WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -56,30 +42,28 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BN_CLICKED, BS_OWNERDRAW, CB_ADDSTRING, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN,
-    CB_RESETCONTENT, CB_SETCURSEL, CB_SETITEMHEIGHT, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CBS_HASSTRINGS, CBS_OWNERDRAWFIXED, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, LoadCursorW, MINMAXINFO, MoveWindow, PostQuitMessage,
-    RegisterClassW, SPI_SETHIGHCONTRAST, SPI_SETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HSCROLL,
-    WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PRINTCLIENT, WM_SETFONT,
-    WM_SETTINGCHANGE, WM_SIZE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+    BN_CLICKED, BS_OWNERDRAW, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
+    CB_SETITEMHEIGHT, CBN_SELCHANGE, CBS_DROPDOWNLIST, CBS_HASSTRINGS, CBS_OWNERDRAWFIXED,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
+    GetWindowLongPtrW, GetWindowRect, HMENU, IDC_ARROW, IDCANCEL, IDOK, LoadCursorW, MINMAXINFO,
+    PostQuitMessage, RegisterClassW, SPI_SETHIGHCONTRAST, SPI_SETNONCLIENTMETRICS, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_HSCROLL, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PRINTCLIENT,
+    WM_SETFONT, WM_SETTINGCHANGE, WM_SIZE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
-use whitescreen_core::{Fill, Pattern, Rgba, Side, kelvin, listing};
+use whitescreen_core::{Fill, Pattern, Rgba, Side, kelvin, listing, options};
 
 use crate::icon::Icons;
-use crate::paint::{colorref, paint};
+use crate::paint::colorref;
 use crate::session::Session;
-use crate::theme::{
-    Fonts, Palette, RADIUS_CARD, RADIUS_CONTROL, apply_window_chrome, focus_ring, glyph,
-    round_rect, text, text_width,
-};
+use crate::theme::{Fonts, Palette, apply_window_chrome};
+use draw::{draw_item, draw_slider, paint_background, paint_foreground};
+use layout::{Chrome, Role, metric};
 
 /// `TBM_GETPOS`, which the generated bindings do not carry: it is plain
 /// `WM_USER`, and the metadata only names the messages that take arguments.
@@ -88,24 +72,39 @@ const TBM_GETPOS: u32 = 0x0400;
 /// Control ids. Grouped by block so that a range test can say which kind of
 /// control a command came from.
 const ID_CHIP_FIRST: usize = 100;
+
 const ID_CHIP_LAST: usize = 109;
+
 const ID_KELVIN_FIRST: usize = 110;
+
 const ID_KELVIN_LAST: usize = 119;
+
 const ID_SHOW: usize = 200;
+
 const ID_HIDE: usize = 201;
+
 const ID_IDENTIFY: usize = 202;
+
 const ID_FILL_FIRST: usize = 210;
+
 const ID_FILL_LAST: usize = 214;
+
 const ID_CYCLE: usize = 220;
+
 const ID_PER_MONITOR: usize = 221;
+
 const ID_APPLIES_TO: usize = 230;
+
 const ID_BRIGHTNESS: usize = 240;
+
 const ID_MONITOR_FIRST: usize = 300;
 
-/// Brightness runs from 5% rather than 0: a black screen is what the black
-/// chip is for, and a slider that can blank the overlay looks like a fault.
-const BRIGHTNESS_MIN: i32 = 5;
-const BRIGHTNESS_MAX: i32 = 100;
+/// The slider's range, in whole percent. The bounds are the core's, where
+/// `--brightness` reads them too: a slider that went somewhere the command
+/// line refused to go would be two different apps.
+const BRIGHTNESS_MIN: i32 = options::BRIGHTNESS_MIN_PERCENT as i32;
+
+const BRIGHTNESS_MAX: i32 = options::BRIGHTNESS_MAX_PERCENT as i32;
 
 /// The preset colours, in the order the GTK build shows them.
 const CHIPS: &[(&str, Rgba)] = &[
@@ -126,44 +125,6 @@ const FILLS: &[(&str, Pattern)] = &[
 ];
 
 const CLASS_NAME: PCWSTR = w!("WhiteScreenControl");
-
-/// WinUI's metrics, in logical pixels, scaled by the window's DPI.
-mod metric {
-    /// The margin around the page.
-    pub const PAGE: f32 = 20.0;
-    /// The margin inside a card.
-    pub const CARD: f32 = 16.0;
-    /// Between cards.
-    pub const GAP: f32 = 12.0;
-    /// A control's height, and the gap between two rows of them.
-    pub const ROW: f32 = 32.0;
-    pub const ROW_GAP: f32 = 8.0;
-    /// A monitor row, which carries two lines: the name and the detail.
-    pub const MONITOR_ROW: f32 = 46.0;
-    /// The tallest the live preview goes. Its width follows from the shape
-    /// of the screen it stands for, so this is the only fixed dimension.
-    pub const PREVIEW: f32 = 232.0;
-    /// The monitor list down the left.
-    pub const SIDEBAR: f32 = 296.0;
-    /// A colour chip, and the shorter key-light chip.
-    pub const CHIP_W: f32 = 46.0;
-    pub const CHIP_H: f32 = 32.0;
-    pub const CHIP_GAP: f32 = 8.0;
-    pub const KELVIN_H: f32 = 26.0;
-    /// A card's heading, and a line of caption text.
-    pub const HEADING: f32 = 24.0;
-    pub const CAPTION: f32 = 18.0;
-    /// The page title at the top of the window.
-    pub const TITLE: f32 = 30.0;
-    /// The box of a checkbox.
-    pub const CHECKBOX: f32 = 20.0;
-    /// The narrowest a command button goes; a long label makes its own.
-    pub const BUTTON_NARROW: f32 = 104.0;
-    /// Below this the cards start to overlap, so the window will not go:
-    /// the sidebar, a gap, and a colour card wide enough for six chips.
-    pub const MIN_W: f32 = 800.0;
-    pub const MIN_H: f32 = 820.0;
-}
 
 /// What a control is, which decides how it draws and what a click means.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -198,37 +159,6 @@ struct Control {
     detail: String,
     /// Whether the pointer is over it. Maintained by `hover_proc`.
     hot: bool,
-}
-
-/// Text the window draws for itself, as opposed to a control's own label.
-struct Label {
-    rect: RECT,
-    text: String,
-    role: Role,
-}
-
-#[derive(Clone, Copy)]
-enum Role {
-    /// The page title: WinUI's Subtitle.
-    Title,
-    /// A card heading: Body Strong.
-    Heading,
-    /// A hint or a field label: Caption, in the secondary colour.
-    Caption,
-}
-
-/// Where everything the window paints itself has ended up.
-///
-/// Recomputed by `layout` and used by both the erase and the paint handler,
-/// so a themed child asking its parent for a background gets the same card
-/// colour it is sitting on.
-#[derive(Default)]
-struct Chrome {
-    preview: RECT,
-    cards: Vec<RECT>,
-    labels: Vec<Label>,
-    /// The brightness readout, whose text comes from the session.
-    brightness: RECT,
 }
 
 struct State {
@@ -319,14 +249,6 @@ impl State {
     }
 }
 
-/// Whether an owner-draw state flag is set.
-fn has(
-    state: windows::Win32::UI::Controls::ODS_FLAGS,
-    flag: windows::Win32::UI::Controls::ODS_FLAGS,
-) -> bool {
-    state.0 & flag.0 != 0
-}
-
 /// Whether a monitor is covered by the current selection.
 ///
 /// An empty selection is every screen, which is what the command line means
@@ -411,22 +333,32 @@ impl ControlWindow {
         // between controls, which is what makes this a Windows app rather
         // than a window with buttons on it.
         while crate::pump_dialog(self.hwnd) {
-            {
-                let cell = unsafe { &*self.state };
+            let cell = unsafe { &*self.state };
+            let pending = {
                 let mut state = cell.borrow_mut();
                 // The overlays need a pass of their own: the queue has to
                 // advance and a hot-plug has to be noticed even while
                 // nobody is touching this window.
                 let was = state.session.is_showing();
                 state.session.tick()?;
-                if was && !state.session.is_showing() {
+                let dismissed = was && !state.session.is_showing();
+                let pending = state.session.next_tick();
+                drop(state);
+                if dismissed {
                     // Dismissed from an overlay; the window stays.
-                    drop(state);
                     self.refresh();
                 }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+                pending
+            };
+            // Nothing to do until the queue's next step, or until the user
+            // does something.
+            crate::wait(pending);
         }
+
+        // Closing the window is this build's "goodbye": whatever was chosen
+        // in it has to outlive it, or the settings file would only ever
+        // record what the command line did.
+        unsafe { &*self.state }.borrow_mut().session.save();
         Ok(())
     }
 
@@ -790,7 +722,7 @@ fn reload(hwnd: HWND, state: &RefCell<State>, dpi: Option<u32>) {
         }
     }
 
-    layout(hwnd, state);
+    layout::place(hwnd, state);
     unsafe {
         let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
@@ -838,7 +770,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_SIZE => {
-            layout(hwnd, state);
+            layout::place(hwnd, state);
             LRESULT(0)
         }
         // A monitor arrived or left.
@@ -1065,766 +997,22 @@ fn set_hot(data: usize, hwnd: HWND, hot: bool) -> bool {
     true
 }
 
-/// The page and the cards: everything behind the controls.
-fn paint_background(hwnd: HWND, state: &RefCell<State>, dc: HDC) {
-    let Ok(s) = state.try_borrow() else { return };
-    let mut client = RECT::default();
-    let _ = unsafe { GetClientRect(hwnd, &raw mut client) };
-
-    unsafe {
-        let brush = CreateSolidBrush(colorref(s.palette.base));
-        FillRect(dc, &raw const client, brush);
-        let _ = DeleteObject(brush.into());
-    }
-
-    let radius = s.px(RADIUS_CARD);
-    for card in &s.chrome.cards {
-        round_rect(dc, *card, radius, Some(s.palette.card), Some(s.palette.card_stroke));
-    }
-}
-
-/// The preview, the headings and the captions.
-fn paint_foreground(state: &RefCell<State>, dc: HDC) {
-    let Ok(s) = state.try_borrow() else { return };
-
-    // The preview, with the corner radius every other surface has. GDI will
-    // not round a fill, so the painter is clipped to the rounded shape
-    // instead.
-    let preview = s.chrome.preview;
-    if preview.right > preview.left && preview.bottom > preview.top {
-        let radius = s.px(RADIUS_CARD);
-        unsafe {
-            let region = CreateRoundRectRgn(
-                preview.left,
-                preview.top,
-                preview.right + 1,
-                preview.bottom + 1,
-                radius * 2,
-                radius * 2,
-            );
-            SelectClipRgn(dc, Some(region));
-            // What the chips are editing, which is the aimed-at monitor's
-            // own colour when "Applies to" names one.
-            let color = s.aimed_color().scaled(s.session.brightness());
-            paint(dc, preview, color, s.session.fill(), s.scale, 0);
-            SelectClipRgn(dc, None);
-            let _ = DeleteObject(region.into());
-        }
-        // A hairline so a white preview has an edge on a white card.
-        round_rect(dc, preview, s.px(RADIUS_CARD), None, Some(s.palette.card_stroke));
-    }
-
-    for label in &s.chrome.labels {
-        let (font, color) = match label.role {
-            Role::Title => (s.fonts.heading, s.palette.text),
-            Role::Heading => (s.fonts.strong, s.palette.text),
-            Role::Caption => (s.fonts.caption, s.palette.text_secondary),
-        };
-        text(
-            dc,
-            label.rect,
-            &label.text,
-            font,
-            color,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-        );
-    }
-
-    let percent = format!("{}%", (s.session.brightness() * 100.0).round() as i32);
-    text(
-        dc,
-        s.chrome.brightness,
-        &percent,
-        s.fonts.caption,
-        s.palette.text_secondary,
-        DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
-    );
-}
-
-/// A vertical cursor: the layout is columns of rows, and this hands them out.
-struct Stack {
-    x: i32,
-    y: i32,
-    width: i32,
-}
-
-impl Stack {
-    fn row(&mut self, height: i32, gap: i32) -> RECT {
-        let rect =
-            RECT { left: self.x, top: self.y, right: self.x + self.width, bottom: self.y + height };
-        self.y += height + gap;
-        rect
-    }
-}
-
-/// Split `rect` into a left part of `width` and the rest, `gap` apart.
-fn split(rect: RECT, width: i32, gap: i32) -> (RECT, RECT) {
-    (RECT { right: rect.left + width, ..rect }, RECT { left: rect.left + width + gap, ..rect })
-}
-
-/// Trim a rectangle inwards on every side.
-fn inset(rect: RECT, by: i32) -> RECT {
-    RECT {
-        left: rect.left + by,
-        top: rect.top + by,
-        right: rect.right - by,
-        bottom: rect.bottom - by,
-    }
-}
-
-/// How wide a checkbox has to be for a label `text` pixels wide: the box,
-/// the gap WinUI puts after it, the text, and a little slack so the focus
-/// ring has somewhere to go.
-fn check_width(s: &State, text: i32) -> i32 {
-    s.px(metric::CHECKBOX) + s.px(10.0) + text + s.px(8.0)
-}
-
-/// Place every control and work out everything the window draws itself.
-fn layout(hwnd: HWND, state: &RefCell<State>) {
-    let moves = {
-        let Ok(mut s) = state.try_borrow_mut() else {
-            return;
-        };
-        let px = |v: f32| (v * s.scale).round() as i32;
-
-        let mut client = RECT::default();
-        let _ = unsafe { GetClientRect(hwnd, &raw mut client) };
-
-        // Control widths are measured rather than guessed: the type ramp
-        // follows the user's text-size setting, so a width that fits
-        // "Per-monitor colors" at 100% clips it at 125%.
-        let dc = unsafe { GetDC(Some(hwnd)) };
-        let measure = |label: &str, font: HFONT| {
-            if dc.is_invalid() { 0 } else { text_width(dc, label, font) }
-        };
-
-        let pad = px(metric::PAGE);
-        let gap = px(metric::GAP);
-        let card_pad = px(metric::CARD);
-        let row = px(metric::ROW);
-        let row_gap = px(metric::ROW_GAP);
-        let heading = px(metric::HEADING);
-        let caption = px(metric::CAPTION);
-
-        let mut chrome = Chrome::default();
-        let mut moves: Vec<(HWND, RECT)> = Vec::new();
-        let mut page = Stack {
-            x: client.left + pad,
-            y: client.top + pad,
-            width: (client.right - client.left - pad * 2).max(px(400.0)),
-        };
-
-        // The page title, the way a WinUI page opens: a subtitle-sized name
-        // and one line saying what the page is for.
-        chrome.labels.push(Label {
-            rect: page.row(px(metric::TITLE), 0),
-            text: "White Screen".to_string(),
-            role: Role::Title,
-        });
-        chrome.labels.push(Label {
-            rect: page.row(caption, gap),
-            text: "Solid colors and test patterns on every attached screen.".to_string(),
-            role: Role::Caption,
-        });
-
-        // The preview is the shape of the screen it stands for, not the
-        // shape of the card it sits in. A wedge judged in the wrong aspect
-        // ratio has bands of the wrong width, and a grid the wrong pitch,
-        // which is the whole of what the preview is for.
-        let (aspect_w, aspect_h) = s.aimed_aspect();
-        let tall = px(metric::PREVIEW);
-        let mut preview_h = tall;
-        let mut preview_w = (preview_h as f32 * aspect_w / aspect_h).round() as i32;
-        if preview_w > page.width {
-            preview_w = page.width;
-            preview_h = (preview_w as f32 * aspect_h / aspect_w).round() as i32;
-        }
-        let band = page.row(preview_h, gap);
-        chrome.preview = RECT {
-            left: band.left + (page.width - preview_w) / 2,
-            right: band.left + (page.width - preview_w) / 2 + preview_w,
-            ..band
-        };
-
-        // The two-column row: the screens on the left, colour on the right.
-        let screens = s.session.screens().len() as i32;
-        let monitor_row = px(metric::MONITOR_ROW);
-        let displays_h = card_pad * 2 + heading + caption + screens.max(1) * monitor_row;
-        let colour_h = card_pad * 2
-            + heading
-            + px(metric::CHIP_H)
-            + px(10.0)
-            + caption
-            + px(metric::KELVIN_H)
-            + gap
-            + row
-            + row_gap
-            + row;
-        let columns = page.row(displays_h.max(colour_h), gap);
-        let sidebar = px(metric::SIDEBAR).min(page.width / 2);
-        let (displays_card, colour_card) = split(columns, sidebar, gap);
-        chrome.cards.push(displays_card);
-        chrome.cards.push(colour_card);
-
-        // The screens.
-        let mut column = Stack {
-            x: displays_card.left + card_pad,
-            y: displays_card.top + card_pad,
-            width: sidebar - card_pad * 2,
-        };
-        chrome.labels.push(Label {
-            rect: column.row(heading, 0),
-            text: "Displays".to_string(),
-            role: Role::Heading,
-        });
-        chrome.labels.push(Label {
-            rect: column.row(caption, 0),
-            text: "Which screens an overlay covers".to_string(),
-            role: Role::Caption,
-        });
-        for control in s.controls.iter().filter(|c| c.kind == Kind::Monitor) {
-            moves.push((control.hwnd, column.row(monitor_row, 0)));
-        }
-
-        // Colour.
-        let mut column = Stack {
-            x: colour_card.left + card_pad,
-            y: colour_card.top + card_pad,
-            width: colour_card.right - colour_card.left - card_pad * 2,
-        };
-        chrome.labels.push(Label {
-            rect: column.row(heading, 0),
-            text: "Color".to_string(),
-            role: Role::Heading,
-        });
-
-        let chips = column.row(px(metric::CHIP_H), px(10.0));
-        let chip_w = px(metric::CHIP_W);
-        let chip_gap = px(metric::CHIP_GAP);
-        for (i, control) in
-            s.controls.iter().filter(|c| (ID_CHIP_FIRST..ID_CHIP_LAST).contains(&c.id)).enumerate()
-        {
-            let left = chips.left + i as i32 * (chip_w + chip_gap);
-            moves.push((control.hwnd, RECT { left, right: left + chip_w, ..chips }));
-        }
-        if let Some(custom) = s.control(ID_CHIP_LAST) {
-            let left = chips.left + CHIPS.len() as i32 * (chip_w + chip_gap);
-            moves.push((
-                custom.hwnd,
-                RECT { left, right: left + px(metric::BUTTON_NARROW), ..chips },
-            ));
-        }
-
-        chrome.labels.push(Label {
-            rect: column.row(caption, 0),
-            text: "Key light".to_string(),
-            role: Role::Caption,
-        });
-        let kelvin_row = column.row(px(metric::KELVIN_H), gap);
-        for (i, control) in s
-            .controls
-            .iter()
-            .filter(|c| (ID_KELVIN_FIRST..=ID_KELVIN_LAST).contains(&c.id))
-            .enumerate()
-        {
-            let left = kelvin_row.left + i as i32 * (chip_w + chip_gap);
-            moves.push((control.hwnd, RECT { left, right: left + chip_w, ..kelvin_row }));
-        }
-
-        // "Applies to" and the per-monitor switch share a row.
-        let aim_row = column.row(row, row_gap);
-        let label_w = measure("Applies to", s.fonts.caption)
-            .max(measure("Brightness", s.fonts.caption))
-            + px(12.0);
-        let (aim_label, rest) = split(aim_row, label_w, px(4.0));
-        chrome.labels.push(Label {
-            rect: aim_label,
-            text: "Applies to".to_string(),
-            role: Role::Caption,
-        });
-        let (combo, per_monitor) = split(rest, px(168.0), gap);
-        if let Some(control) = s.control(ID_APPLIES_TO) {
-            // A drop-down list clamps itself to the field height; the extra
-            // is the room its list is allowed to use.
-            moves.push((control.hwnd, RECT { bottom: combo.bottom + px(180.0), ..combo }));
-        }
-        if let Some(control) = s.control(ID_PER_MONITOR) {
-            moves.push((control.hwnd, per_monitor));
-        }
-
-        // Brightness: the label, the slider, the readout.
-        let bright_row = column.row(row, 0);
-        let (bright_label, rest) = split(bright_row, label_w, px(4.0));
-        chrome.labels.push(Label {
-            rect: bright_label,
-            text: "Brightness".to_string(),
-            role: Role::Caption,
-        });
-        let readout = px(44.0);
-        let (slider, value) = split(rest, (rest.right - rest.left - readout).max(px(80.0)), 0);
-        if let Some(control) = s.control(ID_BRIGHTNESS) {
-            moves.push((control.hwnd, slider));
-        }
-        chrome.brightness = value;
-
-        // Pattern.
-        let pattern_card = page.row(card_pad * 2 + heading + row, gap);
-        chrome.cards.push(pattern_card);
-        let mut column = Stack {
-            x: pattern_card.left + card_pad,
-            y: pattern_card.top + card_pad,
-            width: pattern_card.right - pattern_card.left - card_pad * 2,
-        };
-        chrome.labels.push(Label {
-            rect: column.row(heading, 0),
-            text: "Pattern".to_string(),
-            role: Role::Heading,
-        });
-        let fills = column.row(row, 0);
-        let mut left = fills.left;
-        for control in s.controls.iter().filter(|c| (ID_FILL_FIRST..=ID_FILL_LAST).contains(&c.id))
-        {
-            let width = check_width(&s, measure(&control.label, s.fonts.body));
-            moves.push((control.hwnd, RECT { left, right: left + width, ..fills }));
-            left += width + gap;
-        }
-
-        // Session.
-        let session_card = page.row(card_pad * 2 + heading + row, gap);
-        chrome.cards.push(session_card);
-        let mut column = Stack {
-            x: session_card.left + card_pad,
-            y: session_card.top + card_pad,
-            width: session_card.right - session_card.left - card_pad * 2,
-        };
-        chrome.labels.push(Label {
-            rect: column.row(heading, 0),
-            text: "Session".to_string(),
-            role: Role::Heading,
-        });
-        let switches = column.row(row, 0);
-        let mut left = switches.left;
-        for id in [ID_CYCLE, ID_IDENTIFY] {
-            let Some(control) = s.control(id) else {
-                continue;
-            };
-            let width = check_width(&s, measure(&control.label, s.fonts.body));
-            moves.push((control.hwnd, RECT { left, right: left + width, ..switches }));
-            left += width + gap * 2;
-        }
-
-        // The commands go at the foot of the window, right-aligned, with
-        // the default action last: the Windows order.
-        let actions = RECT {
-            left: page.x,
-            top: (client.bottom - pad - row).max(page.y),
-            right: page.x + page.width,
-            bottom: (client.bottom - pad).max(page.y + row),
-        };
-        let mut right = actions.right;
-        for id in [ID_SHOW, ID_HIDE] {
-            let Some(control) = s.control(id) else {
-                continue;
-            };
-            // Wide enough for the label, never narrower than WinUI's
-            // minimum button, and free to grow for a longer translation.
-            let width =
-                (measure(&control.label, s.fonts.body) + px(32.0)).max(px(metric::BUTTON_NARROW));
-            moves.push((control.hwnd, RECT { left: right - width, right, ..actions }));
-            right -= width + row_gap;
-        }
-
-        if !dc.is_invalid() {
-            unsafe { ReleaseDC(Some(hwnd), dc) };
-        }
-        // Where the last card ended, plus the row of commands and the
-        // margin under it.
-        s.natural = page.y + row + pad;
-        s.chrome = chrome;
-        moves
-    };
-
-    for (child, rect) in moves {
-        let _ = unsafe {
-            MoveWindow(
-                child,
-                rect.left,
-                rect.top,
-                (rect.right - rect.left).max(0),
-                (rect.bottom - rect.top).max(0),
-                true,
-            )
-        };
-    }
-}
-
-/// Where an owner-drawn face goes, what it sits on, and which of its states
-/// it is in. Bundled because every face needs all six and a function taking
-/// them one at a time reads as a puzzle.
-struct Face {
-    dc: HDC,
-    rect: RECT,
-    /// The colour of the surface underneath, which the focus ring needs and
-    /// the face clears itself to.
-    surface: Rgba,
-    hot: bool,
-    pressed: bool,
-    focused: bool,
-}
-
-/// Paint one owner-drawn control.
-fn draw_item(state: &RefCell<State>, item: &DRAWITEMSTRUCT) {
-    let Ok(s) = state.try_borrow() else { return };
-    if item.CtlType == ODT_COMBOBOX {
-        return draw_combo_item(&s, item);
-    }
-    let Some(control) = s.controls.iter().find(|c| c.hwnd == item.hwndItem) else {
-        return;
-    };
-
-    let face = Face {
-        dc: item.hDC,
-        rect: item.rcItem,
-        // Clear to the surface underneath first. A `BS_OWNERDRAW` button is
-        // never erased for us, and none of these faces cover their whole
-        // rectangle, so without this the ring from the last hover stays put.
-        surface: if control.on_card { s.palette.card } else { s.palette.base },
-        hot: control.hot,
-        pressed: has(item.itemState, ODS_SELECTED),
-        focused: has(item.itemState, ODS_FOCUS),
-    };
-    unsafe {
-        let brush = CreateSolidBrush(colorref(face.surface));
-        FillRect(face.dc, &raw const face.rect, brush);
-        let _ = DeleteObject(brush.into());
-    }
-
-    match control.kind {
-        Kind::Swatch(color) => draw_swatch(&s, &face, color, s.aimed_color() == color),
-        Kind::Push { accent } => draw_push(&s, &face, &control.label, accent),
-        Kind::Check => draw_check(&s, &face, control, s.checked(control.id), None),
-        Kind::Monitor => draw_check(
-            &s,
-            &face,
-            control,
-            s.checked(control.id),
-            Some(s.monitor_swatch(control.id)),
-        ),
-        Kind::Combo | Kind::Slider => {}
-    }
-}
-
-/// A colour chip.
-///
-/// The chip is the colour, so the states cannot be shown by tinting it: a
-/// hover is a ring, a press is a smaller chip, and the chip that matches the
-/// colour now in force wears the accent ring.
-fn draw_swatch(s: &State, face: &Face, color: Rgba, current: bool) {
-    let Face { dc, rect, .. } = *face;
-    let radius = s.px(RADIUS_CONTROL + 2.0);
-    let body = if face.pressed { inset(rect, s.px(2.0)) } else { inset(rect, s.px(1.0)) };
-    // A hairline that contrasts with the fill, so a white chip does not
-    // vanish into a light card -- the same rule as the GTK swatches.
-    let edge = if color.luma() > 0.5 { Rgba::new(0, 0, 0) } else { Rgba::new(255, 255, 255) };
-    let edge = crate::theme::blend(color, edge, 0.35);
-    round_rect(dc, body, radius, Some(color), Some(edge));
-
-    if current {
-        round_rect(dc, rect, radius + s.px(1.0), None, Some(s.palette.accent));
-        round_rect(dc, inset(rect, s.px(1.0)), radius, None, Some(s.palette.accent));
-    } else if face.hot {
-        round_rect(dc, rect, radius + s.px(1.0), None, Some(s.palette.control_stroke));
-    }
-    if face.focused {
-        focus_ring(dc, rect, radius + s.px(1.0), &s.palette, face.surface);
-    }
-}
-
-/// A command button.
-fn draw_push(s: &State, face: &Face, label: &str, accent: bool) {
-    let Face { dc, rect, hot, pressed, .. } = *face;
-    let radius = s.px(RADIUS_CONTROL);
-    let (fill, stroke, ink) = if accent {
-        (s.palette.accent_for(hot, pressed), None, s.palette.on_accent)
-    } else {
-        (s.palette.control_for(hot, pressed), Some(s.palette.control_stroke), s.palette.text)
-    };
-    round_rect(dc, rect, radius, Some(fill), stroke);
-    text(
-        dc,
-        rect,
-        label,
-        s.fonts.body,
-        ink,
-        DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS,
-    );
-    if face.focused {
-        focus_ring(dc, rect, radius, &s.palette, face.surface);
-    }
-}
-
-/// A checkbox, and for a monitor row the screen's colour beside it.
-fn draw_check(s: &State, face: &Face, control: &Control, checked: bool, swatch: Option<Rgba>) {
-    let Face { dc, rect, hot, pressed, .. } = *face;
-    let label = control.label.as_str();
-    let size = s.px(metric::CHECKBOX);
-    let middle = (rect.top + rect.bottom) / 2;
-    let box_rect = RECT {
-        left: rect.left,
-        top: middle - size / 2,
-        right: rect.left + size,
-        bottom: middle + size / 2,
-    };
-    let radius = s.px(RADIUS_CONTROL);
-
-    if checked {
-        round_rect(dc, box_rect, radius, Some(s.palette.accent_for(hot, pressed)), None);
-        text(
-            dc,
-            box_rect,
-            glyph::CHECK,
-            s.fonts.icon,
-            s.palette.on_accent,
-            DT_SINGLELINE | DT_VCENTER | DT_CENTER,
-        );
-    } else {
-        round_rect(
-            dc,
-            box_rect,
-            radius,
-            Some(s.palette.control_for(hot, pressed)),
-            Some(s.palette.control_stroke),
-        );
-    }
-
-    let mut label_rect = RECT { left: box_rect.right + s.px(10.0), ..rect };
-    if let Some(color) = swatch {
-        // The screen's colour at the right-hand end of the row.
-        let chip = s.px(18.0);
-        let chip_rect = RECT {
-            left: rect.right - chip,
-            top: middle - chip / 2,
-            right: rect.right,
-            bottom: middle + chip / 2,
-        };
-        let edge = crate::theme::blend(
-            color,
-            if color.luma() > 0.5 { Rgba::new(0, 0, 0) } else { Rgba::new(255, 255, 255) },
-            0.35,
-        );
-        round_rect(dc, chip_rect, s.px(RADIUS_CONTROL), Some(color), Some(edge));
-        label_rect.right = chip_rect.left - s.px(8.0);
-    }
-    if control.detail.is_empty() {
-        text(
-            dc,
-            label_rect,
-            label,
-            s.fonts.body,
-            s.palette.text,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-        );
-    } else {
-        // Two lines: what the screen is, and where it is plugged in.
-        text(
-            dc,
-            RECT { bottom: middle, ..label_rect },
-            label,
-            s.fonts.body,
-            s.palette.text,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-        );
-        text(
-            dc,
-            RECT { top: middle, ..label_rect },
-            &control.detail,
-            s.fonts.caption,
-            s.palette.text_secondary,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-        );
-    }
-
-    if face.focused {
-        focus_ring(dc, rect, radius, &s.palette, face.surface);
-    }
-}
-
-/// One row of the drop-down, or its closed field.
-fn draw_combo_item(s: &State, item: &DRAWITEMSTRUCT) {
-    let hwnd = item.hwndItem;
-    // -1 is "nothing selected", which only reads as negative once the
-    // unsigned field has been cast back.
-    let index = item.itemID as i32;
-    if index < 0 {
-        return;
-    }
-    // The text belongs to the control, so it has to be asked for it.
-    let length =
-        unsafe { SendMessageW(hwnd, CB_GETLBTEXTLEN, Some(WPARAM(index as usize)), None) }.0;
-    if length <= 0 {
-        return;
-    }
-    let mut buffer = vec![0u16; length as usize + 1];
-    unsafe {
-        SendMessageW(
-            hwnd,
-            CB_GETLBTEXT,
-            Some(WPARAM(index as usize)),
-            Some(LPARAM(buffer.as_mut_ptr() as isize)),
-        );
-    }
-    let label = String::from_utf16_lossy(&buffer[..length as usize]);
-
-    let field = has(item.itemState, ODS_COMBOBOXEDIT);
-    let highlighted = !field && has(item.itemState, ODS_SELECTED);
-    let (fill, ink) = if highlighted {
-        (Some(s.palette.accent), s.palette.on_accent)
-    } else if field {
-        // The themed frame is still the system's, but the inside of it is
-        // ours to clear: leaving it to the theme would leave the last
-        // selection's text underneath this one.
-        (Some(s.palette.control), s.palette.text)
-    } else {
-        (Some(s.palette.card), s.palette.text)
-    };
-
-    if let Some(fill) = fill {
-        unsafe {
-            let brush = CreateSolidBrush(colorref(fill));
-            FillRect(item.hDC, &raw const item.rcItem, brush);
-            let _ = DeleteObject(brush.into());
-        }
-    }
-    let inner = RECT { left: item.rcItem.left + s.px(8.0), ..item.rcItem };
-    text(
-        item.hDC,
-        inner,
-        &label,
-        s.fonts.body,
-        ink,
-        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
-    );
-}
-
-/// Custom-draw the brightness trackbar.
-///
-/// The control stays a trackbar -- keyboard, accessibility, the lot -- and
-/// only its pixels change: a 4 px rail, accent up to the thumb, and a round
-/// thumb with an accent core, which is the Fluent slider.
-fn draw_slider(state: &RefCell<State>, draw: *const NMCUSTOMDRAW) -> u32 {
-    let draw = unsafe { &*draw };
-    if draw.dwDrawStage == CDDS_PREPAINT {
-        return CDRF_NOTIFYITEMDRAW;
-    }
-    if draw.dwDrawStage != CDDS_ITEMPREPAINT {
-        return CDRF_DODEFAULT;
-    }
-    let Ok(s) = state.try_borrow() else {
-        return CDRF_DODEFAULT;
-    };
-
-    match draw.dwItemSpec as u32 {
-        v if v == TBCD_TICS => CDRF_SKIPDEFAULT,
-        v if v == TBCD_CHANNEL => {
-            let height = s.px(4.0).max(2);
-            let middle = (draw.rc.top + draw.rc.bottom) / 2;
-            let rail = RECT {
-                left: draw.rc.left,
-                top: middle - height / 2,
-                right: draw.rc.right,
-                bottom: middle - height / 2 + height,
-            };
-            let radius = height / 2;
-            round_rect(draw.hdc, rail, radius, Some(s.palette.control_stroke), None);
-
-            // The part behind the thumb carries the accent. The thumb's
-            // own rectangle is the honest place to stop: the channel is
-            // wider than the distance the thumb's centre travels.
-            let mut thumb = RECT::default();
-            unsafe {
-                SendMessageW(
-                    draw.hdr.hwndFrom,
-                    TBM_GETTHUMBRECT,
-                    None,
-                    Some(LPARAM(&raw mut thumb as isize)),
-                );
-            }
-            let edge = if thumb.right > thumb.left && thumb.left >= draw.rc.left {
-                (thumb.left + thumb.right) / 2
-            } else {
-                // No thumb rectangle to be had: fall back to the value.
-                let span = (rail.right - rail.left).max(1);
-                let fraction = ((s.session.brightness() * 100.0).round() as i32 - BRIGHTNESS_MIN)
-                    .clamp(0, BRIGHTNESS_MAX - BRIGHTNESS_MIN)
-                    as f32
-                    / (BRIGHTNESS_MAX - BRIGHTNESS_MIN) as f32;
-                rail.left + (span as f32 * fraction) as i32
-            };
-            let filled = RECT { right: edge, ..rail };
-            if filled.right > filled.left {
-                round_rect(draw.hdc, filled, radius, Some(s.palette.accent), None);
-            }
-            CDRF_SKIPDEFAULT
-        }
-        v if v == TBCD_THUMB => {
-            let pressed = draw.uItemState.contains(CDIS_SELECTED);
-            let rect = draw.rc;
-            let middle = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
-            let outer = ((rect.bottom - rect.top).min(rect.right - rect.left) / 2).max(s.px(9.0));
-            // WinUI shrinks the core while the thumb is held.
-            let core = if pressed { outer / 2 } else { (outer * 2) / 3 };
-            unsafe {
-                let pen = CreatePen(PS_SOLID, 1, colorref(s.palette.control_stroke));
-                let brush = CreateSolidBrush(colorref(s.palette.card));
-                let old_pen = SelectObject(draw.hdc, pen.into());
-                let old_brush = SelectObject(draw.hdc, brush.into());
-                let _ = Ellipse(
-                    draw.hdc,
-                    middle.0 - outer,
-                    middle.1 - outer,
-                    middle.0 + outer,
-                    middle.1 + outer,
-                );
-                SelectObject(draw.hdc, old_brush);
-                let _ = DeleteObject(brush.into());
-
-                let core_brush = CreateSolidBrush(colorref(s.palette.accent));
-                let old_brush = SelectObject(draw.hdc, core_brush.into());
-                let core_pen = CreatePen(PS_SOLID, 1, colorref(s.palette.accent));
-                let discarded = SelectObject(draw.hdc, core_pen.into());
-                let _ = Ellipse(
-                    draw.hdc,
-                    middle.0 - core,
-                    middle.1 - core,
-                    middle.0 + core,
-                    middle.1 + core,
-                );
-                SelectObject(draw.hdc, discarded);
-                SelectObject(draw.hdc, old_brush);
-                SelectObject(draw.hdc, old_pen);
-                let _ = DeleteObject(core_pen.into());
-                let _ = DeleteObject(core_brush.into());
-                let _ = DeleteObject(pen.into());
-            }
-            CDRF_SKIPDEFAULT
-        }
-        _ => CDRF_DODEFAULT,
-    }
-}
-
 /// A control was clicked.
 fn command(hwnd: HWND, state: &RefCell<State>, id: usize) {
     // The colour dialog is modal and pumps messages of its own, so no
     // borrow of the state may be held while it is up: a repaint arriving
     // mid-dialog would be the second borrow.
     if id == ID_CHIP_LAST {
-        let current = {
+        let (current, custom) = {
             let Ok(s) = state.try_borrow() else { return };
-            s.aimed_color()
+            (s.aimed_color(), s.session.custom_color())
         };
-        if let Some(picked) = choose_color(hwnd, current)
+        if let Some(picked) = choose_color(hwnd, current, custom)
             && let Ok(mut s) = state.try_borrow_mut()
         {
+            // Remembered as the custom colour as well as applied, so the
+            // dialog opens on it next time.
+            s.session.set_custom_color(picked);
             apply_color(&mut s, picked);
         }
         refresh(hwnd);
@@ -1926,11 +1114,16 @@ fn refresh(hwnd: HWND) {
 /// Ask for a colour with the system picker.
 ///
 /// `None` when the user cancelled, which must leave everything as it was.
-fn choose_color(owner: HWND, current: Rgba) -> Option<Rgba> {
+fn choose_color(owner: HWND, current: Rgba, saved: Option<Rgba>) -> Option<Rgba> {
     // The dialog keeps the sixteen custom slots in whatever the caller
     // hands it, so they live for the process rather than the call.
     static CUSTOM: std::sync::Mutex<[u32; 16]> = std::sync::Mutex::new([0x00FF_FFFF; 16]);
     let mut custom = CUSTOM.lock().ok()?;
+    // The colour the picker last produced, from a previous run of the app,
+    // goes in the first slot: the dialog is then where it was left.
+    if let Some(saved) = saved {
+        custom[0] = colorref(saved).0;
+    }
     let mut slots: [COLORREF; 16] = std::array::from_fn(|i| COLORREF(custom[i]));
 
     let mut cc = CHOOSECOLORW {
@@ -1985,6 +1178,6 @@ fn aim(hwnd: HWND, state: &RefCell<State>) {
     }
     // Laid out again, not merely repainted: the preview is the shape of the
     // screen it is aimed at, so aiming it somewhere else resizes it.
-    layout(hwnd, state);
+    layout::place(hwnd, state);
     refresh(hwnd);
 }

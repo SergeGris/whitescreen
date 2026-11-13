@@ -26,11 +26,18 @@ fn main() {
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    use whitescreen_win::{ControlWindow, Session, VERSION, attach_console, cli, monitors};
+    use whitescreen_win::{
+        ControlWindow, Session, VERSION, alert_on_panic, attach_console, can_print, cli, monitors,
+    };
 
     // Printing comes before anything is parsed: a usage error has to reach
     // whoever typed it, and a windowed program has to ask for a console.
     attach_console();
+    if !can_print() {
+        // Double-clicked, so a panic would take the window away and leave
+        // nothing behind to say why.
+        alert_on_panic();
+    }
 
     // Whether anything was asked for at all. `whitescreen.exe` on its own
     // opens the window; any flag means the caller wants the thing it names.
@@ -38,11 +45,7 @@ fn main() -> std::process::ExitCode {
 
     let opts = match cli::parse(std::env::args().skip(1)) {
         Ok(opts) => opts,
-        Err(message) => {
-            eprintln!("whitescreen: {message}");
-            eprintln!("Try 'whitescreen --help'.");
-            return std::process::ExitCode::FAILURE;
-        }
+        Err(message) => return fail(format!("{message}\n\nTry 'whitescreen --help'.")),
     };
 
     match opts.action {
@@ -63,37 +66,39 @@ fn main() -> std::process::ExitCode {
 
     let mut session = match Session::new(&opts) {
         Ok(session) => session,
-        Err(e) => {
-            eprintln!("whitescreen: {e}");
-            return std::process::ExitCode::FAILURE;
-        }
+        Err(e) => return fail(e),
     };
 
     // A bare invocation is "show me the app"; one that puts something on the
     // screens does that and nothing else, so a keybind gets the colour and
     // not a control panel. The same rule as the GTK build.
     if bare {
-        return match ControlWindow::new(session).and_then(|w| w.run()) {
+        return match ControlWindow::new(session).and_then(|window| window.run()) {
             Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("whitescreen: {e}");
-                std::process::ExitCode::FAILURE
-            }
+            Err(e) => fail(e),
         };
     }
 
     let (chosen, unmatched) = session.chosen();
+    if chosen.is_empty() {
+        // Nothing to cover: either every pattern missed, or there is no
+        // screen to miss. Naming what is there turns a mistyped pattern
+        // into a one-line fix instead of a second run with
+        // --list-monitors, which is what the GTK build does too.
+        return fail(if unmatched.is_empty() {
+            "no monitors are attached".to_string()
+        } else {
+            format!("no monitor matches {}\nattached: {}", unmatched.join(", "), attached())
+        });
+    }
+    // Something missed, but something else matched: a warning, not a
+    // failure, though the exit code still says so below.
     for pattern in &unmatched {
         eprintln!("whitescreen: no monitor matches {pattern}");
     }
-    if chosen.is_empty() {
-        eprintln!("whitescreen: attached: {}", attached());
-        return std::process::ExitCode::FAILURE;
-    }
 
     if let Err(e) = session.run() {
-        eprintln!("whitescreen: {e}");
-        return std::process::ExitCode::FAILURE;
+        return fail(e);
     }
     // Something was wrong with the invocation even though the colour went
     // up: say so in the exit code, as the GTK build does.
@@ -107,11 +112,22 @@ fn main() -> std::process::ExitCode {
 /// The monitor names that are there, for when a pattern matched none.
 #[cfg(windows)]
 fn attached() -> String {
-    whitescreen_win::monitors()
-        .iter()
-        .map(|m| m.key.clone())
-        .collect::<Vec<_>>()
-        .join(", ")
+    whitescreen_win::monitors().iter().map(|m| m.key.clone()).collect::<Vec<_>>().join(", ")
+}
+
+/// Report a fatal problem, and give up.
+///
+/// Printed where printing works, and shown in a message box where it does
+/// not: a windowed program launched from Explorer has nowhere to print, and
+/// a tool that fails silently when double-clicked is one nobody can
+/// diagnose.
+#[cfg(windows)]
+fn fail(message: impl std::fmt::Display) -> std::process::ExitCode {
+    eprintln!("whitescreen: {message}");
+    if !whitescreen_win::can_print() {
+        whitescreen_win::alert(&message.to_string());
+    }
+    std::process::ExitCode::FAILURE
 }
 
 /// Print the monitor list.

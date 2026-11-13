@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use whitescreen_core::queue::{DEFAULT, Steps};
+use whitescreen_core::queue::{self, DEFAULT, Steps};
 use whitescreen_core::settings::Settings;
 use whitescreen_core::{Fill, Pattern, Rgba, Side, glob};
 
@@ -32,18 +32,11 @@ use crate::power::KeepAwake;
 /// window to avoid.
 const RESCAN_EVERY: Duration = Duration::from_secs(1);
 
-/// How long the loop sleeps between passes when nothing is happening.
-const IDLE: Duration = Duration::from_millis(10);
-
 /// The fill the settings describe, or the plain colour when they describe
 /// none. The pattern names are the ones `--pattern` takes and the GTK build
 /// stores, so a profile written by either is understood by both.
 fn saved_fill(settings: &Settings) -> Fill {
-    let side = settings
-        .region_side()
-        .as_deref()
-        .and_then(Side::from_key)
-        .unwrap_or(Side::Full);
+    let side = settings.region_side().as_deref().and_then(Side::from_key).unwrap_or(Side::Full);
     settings
         .pattern()
         .as_deref()
@@ -140,19 +133,20 @@ impl Session {
             .or(Some(saved_queue.as_slice()).filter(|q| !q.is_empty()))
             .unwrap_or(DEFAULT)
             .to_vec();
-        let interval = if opts.interval == crate::cli::INTERVAL_DEFAULT {
-            settings.cycle_interval().unwrap_or(crate::cli::INTERVAL_DEFAULT)
+        let interval = queue::clamp_interval(if opts.interval == queue::INTERVAL_DEFAULT {
+            // Nothing asked for on the command line, so whatever was saved
+            // -- which is a file a person can edit, so it goes through the
+            // clamp like anything else.
+            settings.cycle_interval().unwrap_or(queue::INTERVAL_DEFAULT)
         } else {
             opts.interval
-        };
+        });
         let cycle = opts.cycle.then(|| {
             let mut steps = Steps::default();
             steps.set_colors(&queue);
             Cycle {
                 steps,
-                interval: Duration::from_secs_f64(
-                    interval.clamp(crate::cli::INTERVAL_MIN, crate::cli::INTERVAL_MAX),
-                ),
+                interval: Duration::from_secs_f64(interval),
                 next_at: Instant::now(),
                 paused: false,
             }
@@ -182,11 +176,18 @@ impl Session {
                 && (!opts.monitor_colors.is_empty() || settings.per_monitor_colors())
                 && !per_monitor.is_empty(),
             per_monitor,
-            patterns: opts.monitors.clone(),
+            // A flag beats the file here too. The selection is in the same
+            // settings file the GTK build writes, so a profile made there
+            // picks the same screens here.
+            patterns: if opts.monitors.is_empty() {
+                settings.monitors()
+            } else {
+                opts.monitors.clone()
+            },
             identify: opts.identify,
             cycle,
             saved_queue: queue,
-            saved_interval: interval.clamp(crate::cli::INTERVAL_MIN, crate::cli::INTERVAL_MAX),
+            saved_interval: interval,
             auto_hide,
             deadline: None,
             showing: false,
@@ -271,7 +272,7 @@ impl Session {
             if !self.tick()? {
                 break;
             }
-            std::thread::sleep(IDLE);
+            crate::wait(self.next_tick());
         }
         self.save();
         Ok(())
@@ -282,13 +283,18 @@ impl Session {
     /// Not the colour the queue happened to stop on: while it is playing the
     /// colour belongs to the timer, and what deserves saving is the one the
     /// user chose. The GTK build draws the same line.
-    fn save(&mut self) {
+    ///
+    /// Public because both front ends end: the command line saves when the
+    /// colour comes down, and the window when it closes.
+    pub fn save(&mut self) {
         let chosen = match &self.cycle {
             Some(_) => self.settings.color().unwrap_or(self.shared),
             None => self.shared,
         };
         self.settings.set_color(chosen);
         self.settings.set_brightness(f64::from(self.brightness));
+        self.settings.set_auto_hide(self.auto_hide.unwrap_or(0));
+        self.settings.set_monitors(&self.patterns);
         self.settings.set_per_monitor_colors(self.per_monitor_on);
 
         let mut colors: Vec<(String, Rgba)> =
@@ -300,21 +306,38 @@ impl Session {
             self.settings.set_queue(cycle.steps.colors());
             self.settings.set_cycle_interval(cycle.interval.as_secs_f64());
         }
-        match self.fill {
-            Fill::Region { side, rest } => {
-                self.settings.set_pattern(if side == Side::Full && rest.is_none() {
-                    "flat"
-                } else {
-                    "region"
-                });
-                self.settings.set_region_side(side.as_key());
-                self.settings.set_second_color(rest);
-            }
-            Fill::Noise => self.settings.set_pattern("exerciser"),
-            Fill::Wedge => self.settings.set_pattern("wedge"),
-            Fill::Grid => self.settings.set_pattern("grid"),
+        // Which of the five modes this is, in the core's words rather than
+        // this file's: the names are a promise to the GTK build and to
+        // every settings file already written.
+        self.settings.set_pattern(self.fill.pattern().as_key());
+        if let Fill::Region { side, rest } = self.fill {
+            // Kept even for a flat colour, so that coming back to the
+            // region mode comes back to the half last used.
+            self.settings.set_region_side(side.as_key());
+            self.settings.set_second_color(rest);
         }
         self.settings.save();
+    }
+
+    /// How long until something here needs doing, or `None` when nothing
+    /// does and the loop may sleep until the user acts.
+    ///
+    /// What a loop waits on instead of waking a hundred times a second to
+    /// find that nothing has changed. Three things are on a clock: the
+    /// queue's next step, the auto-hide deadline, and the periodic rescan
+    /// that catches a monitor appearing.
+    pub fn next_tick(&self) -> Option<Duration> {
+        if !self.showing {
+            return None;
+        }
+        let mut soonest = self.last_scan + RESCAN_EVERY;
+        if let Some(cycle) = &self.cycle {
+            soonest = soonest.min(cycle.next_at);
+        }
+        if let Some(deadline) = self.deadline {
+            soonest = soonest.min(deadline);
+        }
+        Some(soonest.saturating_duration_since(Instant::now()))
     }
 
     /// Handle what the overlays have seen. True when it is time to stop.
@@ -460,6 +483,18 @@ impl Session {
         Ok(())
     }
 
+    /// The colour the custom picker last produced, if there is one saved.
+    ///
+    /// Kept so that the dialog opens on the colour it was last given rather
+    /// than on white, which is what the GTK build's custom chip does.
+    pub fn custom_color(&self) -> Option<Rgba> {
+        self.settings.custom_color()
+    }
+
+    pub fn set_custom_color(&mut self, color: Rgba) {
+        self.settings.set_custom_color(color);
+    }
+
     /// Every attached screen, as last read.
     pub fn screens(&self) -> &[Monitor] {
         &self.screens
@@ -479,7 +514,7 @@ impl Session {
     }
 
     pub fn set_interval(&mut self, secs: f64) {
-        let secs = secs.clamp(crate::cli::INTERVAL_MIN, crate::cli::INTERVAL_MAX);
+        let secs = queue::clamp_interval(secs);
         self.saved_interval = secs;
         if let Some(cycle) = &mut self.cycle {
             cycle.interval = Duration::from_secs_f64(secs);

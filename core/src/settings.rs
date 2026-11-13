@@ -92,8 +92,25 @@ impl Settings {
             eprintln!("whitescreen: cannot create {}: {e}", dir.display());
             return;
         }
-        if let Err(e) = std::fs::write(&self.path, self.file.to_string()) {
-            eprintln!("whitescreen: cannot write {}: {e}", self.path.display());
+        // Written beside the target and renamed over it, rather than
+        // truncating the real file and writing into it. A profile is small
+        // and the write is quick, but quick is not atomic: the portable
+        // build lives on a stick that can be pulled out, and the failure
+        // mode of the simple way is an empty settings file where the old
+        // one used to be. A rename either happens or does not.
+        //
+        // The process id is in the temporary name so that two copies of the
+        // app saving at the same moment cannot write the same file.
+        let temporary = self.path.with_extension(format!("{}.tmp", std::process::id()));
+        if let Err(e) = std::fs::write(&temporary, self.file.to_string()) {
+            eprintln!("whitescreen: cannot write {}: {e}", temporary.display());
+            return;
+        }
+        if let Err(e) = std::fs::rename(&temporary, &self.path) {
+            eprintln!("whitescreen: cannot replace {}: {e}", self.path.display());
+            // The old file is still the good one; the half-written copy is
+            // not worth keeping.
+            let _ = std::fs::remove_file(&temporary);
         }
     }
 
@@ -277,6 +294,54 @@ mod tests {
     /// Build an in-memory Settings pointed at a path that is never written.
     fn scratch() -> Settings {
         Settings { file: Ini::new(), path: PathBuf::from("/nonexistent/settings.ini") }
+    }
+
+    /// A directory of our own under the system's temporary one, removed by
+    /// the test that made it.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("whitescreen-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        dir
+    }
+
+    #[test]
+    fn saving_writes_the_file_and_reads_back() {
+        let dir = scratch_dir("save");
+        let path = dir.join("whitescreen.ini");
+
+        let mut settings = Settings::load(&path);
+        settings.set_color(CYAN);
+        settings.set_brightness(0.5);
+        settings.save();
+
+        assert_eq!(Settings::load(&path).color(), Some(CYAN));
+        assert_eq!(Settings::load(&path).brightness(), Some(0.5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file is replaced through a rename, so a half-written profile can
+    /// never be the one left behind, and nothing is left lying beside it.
+    #[test]
+    fn saving_replaces_the_old_file_and_leaves_no_litter() {
+        let dir = scratch_dir("replace");
+        let path = dir.join("whitescreen.ini");
+
+        let mut first = Settings::load(&path);
+        first.set_color(CYAN);
+        first.save();
+
+        let mut second = Settings::load(&path);
+        second.set_color(Rgba::new(1, 2, 3));
+        second.save();
+
+        assert_eq!(Settings::load(&path).color(), Some(Rgba::new(1, 2, 3)));
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the directory")
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(left, ["whitescreen.ini"], "only the profile itself: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

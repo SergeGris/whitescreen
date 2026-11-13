@@ -55,9 +55,9 @@ mod window;
 #[cfg(windows)]
 pub use badge::Badge;
 #[cfg(windows)]
-pub use console::attach as attach_console;
+pub use console::{alert, alert_on_panic, attach as attach_console, can_print};
 #[cfg(windows)]
-pub use message::{pump, pump_dialog};
+pub use message::{pump, pump_dialog, wait};
 #[cfg(windows)]
 pub use monitor::{Monitor, monitors, select_matching};
 #[cfg(windows)]

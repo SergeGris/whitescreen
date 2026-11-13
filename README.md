@@ -188,6 +188,11 @@ The settings *format* is one implementation in `whitescreen-core`, right down
 to how a backslash is escaped, so a profile written by one build is read by
 the other. Only the location differs, because the Windows build is portable.
 
+It is written through a rename rather than by truncating the file in place.
+A profile is small and the write is quick, but quick is not atomic, and the
+portable build lives on a stick that can be pulled out: the failure mode of
+the simple way is an empty settings file where the old one used to be.
+
 #### The Windows control window
 
 `whitescreen.exe` with no arguments opens a native Win32 window: a live
@@ -234,6 +239,22 @@ It is built to look like a Windows 11 app rather than like Win32:
   thumb come out Fluent.
 - **An icon drawn at run time**, in the accent colour, at whatever sizes the
   shell asks for: a portable single executable has nowhere to keep a `.ico`.
+
+And the parts that are not about looks:
+
+- **Nothing is polled.** The loop waits on `MsgWaitForMultipleObjectsEx`
+  until there is a message or until the queue's next step is due, rather than
+  waking a hundred times a second to find that nothing has happened. Idle,
+  with no overlay up, it is asleep.
+- **A failure is visible.** A windowed program launched from Explorer has
+  nowhere to print, so a bad argument or a failure to start says so in a
+  message box, and a panic does too — otherwise the window would simply
+  never appear and leave nothing behind to say why.
+- **What you chose is kept.** Closing the window writes the profile: the
+  colour, brightness, the pattern and its half, per-monitor colours, the
+  queue and its interval, the monitor selection, auto-hide, and the last
+  custom colour. The same keys the GTK build writes, so the promise that
+  either build reads the other's profile covers all of them.
 
 None of the drawing above has been seen on a real screen: CI type-checks and
 lints it for `x86_64-pc-windows-msvc`, links the release executable and runs
